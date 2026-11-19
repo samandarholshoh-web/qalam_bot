@@ -7,7 +7,7 @@ import string
 import google.generativeai as genai
 
 # 1. Bu yerga o'zingizning botingiz tokeni va Gemini kalitingizni yozasiz
-BOT_TOKEN = "9021810372:AAH7cVnFxcpkwC2cHz5oA2isJ48Iaz2JMas"
+BOT_TOKEN = "9021810372:AAFB8HkcDdNPZXP58EFLGBU2NuhLpJS8nuQ"
 GEMINI_API_KEY = "curl -fsSL https://dev.meta.ai/install.sh | bash"  # O'zingizning kalitingizni qo'shtirnoq ichiga yozasiz
 
 # Gemini AI ni sozlash
