@@ -1,5 +1,6 @@
-import os
 import logging
+import asyncio
+import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -66,7 +67,5 @@ async def handle_ai_query(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
-
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
