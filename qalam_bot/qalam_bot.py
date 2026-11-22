@@ -53,10 +53,12 @@ async def process_token(callback: types.CallbackQuery):
 async def handle_ai_query(message: types.Message):
     wait_msg = await message.answer("⏳ Sun'iy intellekt o'ylamoqda...")
     
+    try:
+        response = 
+client.models.generate_content(
     
-        response = client.models.generate_content(
-            model="gemini-2.5f-flash",
-            contents=message.text,
+model="gemini-2.5f-flash",
+         contents=message.text,
         )
         ai_reply = response.text
         
