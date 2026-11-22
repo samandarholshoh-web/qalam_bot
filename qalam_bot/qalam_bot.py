@@ -91,4 +91,14 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         "paid_sent_msg": "⏳ <b>To'lov tekshiruvga yuborildi.</b> Admin tasdiqlashini kuting.",
         "paid_toast": "To'lov tekshiruvga yuborildi.",
         "key_approved": "🔑 <b>Ilova uchun aktivatsiya kodingiz:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Ilova
+        "key_pending": "🔒 <b>Ilova kodi hali yopiq.</b> To'lovingiz tekshiruvda.",
+        "key_unpaid": "🔒 <b>Ilova kodi yopiq.</b>\nAvval <b>«💳 5,000 UZS to'lash»</b> orqali <code>{click_card}</code> kartasiga to'lov qiling.",
+        "quota_error": "⏳ Bugungi bepul AI so'rovlar limiti tugadi.",
+        "ai_busy_error": "😔 AI serverlarida yuklama yuqori. Qayta urinib ko'ring.",
+    },
+    "ru": {
+        "pay_btn": "💳 Оплатить 5,000 UZS",
+        "key_btn": "🔑 Получить код активации",
+        "lang_btn": "🌐 Сменить язык",
+        "lang_chosen": "✅ Язык выбран: <b>Русский</b>.\nЗадавайте вопросы только о боте, оплате, приложении и создателе.",
+        "already_approved": "✅ Ваша оплата подтверждена!\n📱 Код активации: <code>{key}
