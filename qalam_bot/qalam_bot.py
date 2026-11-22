@@ -22,6 +22,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
+logger = logging.getLogger("qalam_bot")
 
 # 1. Muhit o'zgaruvchilari va sozlamalar
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -66,6 +67,7 @@ def init_db() -> None:
             """
         )
         conn.commit()
+    logger.info("SQLite baza tayyorlandi: %s", DB_PATH)
 
 
 def get_or_create_user(user: types.User) -> Dict[str, Any]:
@@ -100,7 +102,9 @@ def get_or_create_user(user: types.User) -> Dict[str, Any]:
             "SELECT user_id, username, full_name, status, activation_key FROM users WHERE user_id = ?",
             (user.id,),
         ).fetchone()
-        return dict(updated) if updated else {
+        if updated:
+            return dict(updated)
+        return {
             "user_id": user.id,
             "username": username,
             "full_name": full_name,
@@ -136,7 +140,8 @@ def set_user_status(
 
 
 def generate_key_for_user(user_id: int) -> str:
-    raw_string = f"QALAM-{user_id}-{BOT_TOKEN[:10]}"
+    token_prefix = (BOT_TOKEN or "")[:10]
+    raw_string = f"QALAM-{user_id}-{token_prefix}"
     digest = hashlib.sha256(raw_string.encode("utf-8")).hexdigest().upper()
     part1 = digest[:5]
     part2 = digest[5:10]
@@ -146,11 +151,38 @@ def generate_key_for_user(user_id: int) -> str:
 # 3. Gemini AI va loglash
 async def log_available_models() -> None:
     try:
-        models = await asyncio.to_thread(client.models.list)
+        models = await asyncio.wait_for(
+            asyncio.to_thread(client.models.list),
+            timeout=15,
+        )
         model_names = [getattr(m, "name", str(m)) for m in models]
-        logging.info("Mavjud Gemini modellari: %s", model_names)
+        logger.info("Mavjud Gemini modellari: %s", model_names)
     except Exception as e:
-        logging.error("Modellarni olishda xatolik yuz berdi: %s", repr(e))
+        logger.error("Modellarni olishda xatolik yuz berdi: %s", repr(e), exc_info=True)
+
+
+async def _call_gemini_once(model_name: str, prompt: str) -> str:
+    if hasattr(client, "aio") and hasattr(client.aio, "models"):
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            ),
+            timeout=25,
+        )
+    else:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.models.generate_content,
+                model=model_name,
+                contents=prompt,
+            ),
+            timeout=25,
+        )
+    text = getattr(response, "text", None)
+    if not text or not text.strip():
+        raise ValueError("Model bo'sh javob qaytardi.")
+    return text.strip()
 
 
 async def generate_ai_reply(prompt: str) -> str:
@@ -158,26 +190,35 @@ async def generate_ai_reply(prompt: str) -> str:
     for model_name in MODELS:
         for attempt in range(4):
             try:
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=model_name,
-                    contents=prompt,
+                reply = await _call_gemini_once(model_name, prompt)
+                logger.info(
+                    "AI javob olindi (model=%s, urinish=%d/4)",
+                    model_name,
+                    attempt + 1,
                 )
-                text = getattr(response, "text", None)
-                if text and text.strip():
-                    return text.strip()
-                raise RuntimeError("Model bo'sh javob qaytardi.")
+                return reply
+            except asyncio.TimeoutError as e:
+                last_error = e
+                logger.warning(
+                    "Gemini so'rovi vaqti tugadi (model=%s, urinish=%d/4)",
+                    model_name,
+                    attempt + 1,
+                )
             except Exception as e:
                 last_error = e
-                logging.error(
+                logger.error(
                     "Gemini xatosi (model=%s, urinish=%d/4): %s",
                     model_name,
                     attempt + 1,
                     repr(e),
+                    exc_info=True,
                 )
-                if attempt < 3:
-                    await asyncio.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"AI javob bera olmadi: {last_error}")
+
+            if attempt < 3:
+                wait_seconds = 1.5 * (attempt + 1)
+                await asyncio.sleep(wait_seconds)
+
+    raise RuntimeError(f"Barcha urinishlar muvaffaqiyatsiz tugadi: {last_error}")
 
 
 # 4. Tugmalar va to'lov/aktivatsiya oqimi
@@ -272,6 +313,37 @@ async def handle_payment_menu(message: Message) -> None:
     )
 
 
+@dp.message(F.text == "🔑 Aktivatsiya kodini olish")
+async def handle_get_activation_key(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_data = get_or_create_user(message.from_user)
+    status = user_data["status"]
+    activation_key = user_data["activation_key"]
+
+    if status == "approved" and activation_key:
+        await message.answer(
+            f"🔑 <b>Sizning aktivatsiya kodingiz:</b>\n"
+            f"<code>{html.escape(str(activation_key))}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard,
+        )
+    elif status == "pending":
+        await message.answer(
+            "🔒 <b>Aktivatsiya kodi hali yopiq.</b>\n"
+            "To'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
+            parse_mode="HTML",
+            reply_markup=main_keyboard,
+        )
+    else:
+        await message.answer(
+            "🔒 <b>Aktivatsiya kodi yopiq.</b>\n"
+            "Avval <b>«💳 5,000 UZS to'lash»</b> tugmasi orqali to'lovni amalga oshiring.",
+            parse_mode="HTML",
+            reply_markup=main_keyboard,
+        )
+
+
 @dp.callback_query(F.data == "paid_confirm")
 async def handle_paid_confirm(callback: CallbackQuery) -> None:
     if not callback.from_user:
@@ -291,7 +363,7 @@ async def handle_paid_confirm(callback: CallbackQuery) -> None:
                 parse_mode="HTML",
             )
         except Exception as e:
-            logging.error("Xabarni yangilashda xato: %s", repr(e))
+            logger.error("Xabarni yangilashda xato: %s", repr(e))
 
     admin_text = (
         "📥 <b>Yangi to'lov so'rovi!</b>\n\n"
@@ -308,7 +380,7 @@ async def handle_paid_confirm(callback: CallbackQuery) -> None:
             reply_markup=admin_approval_keyboard(user_id),
         )
     except Exception as e:
-        logging.error("Adminga xabar yuborishda xato: %s", repr(e))
+        logger.error("Adminga xabar yuborishda xato: %s", repr(e))
 
     await callback.answer("To'lov tekshiruvga yuborildi.", show_alert=False)
 
@@ -328,6 +400,154 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
         await callback.answer("Noto'g'ri foydalanuvchi ID.", show_alert=True)
         return
 
+    target_user = get_user_by_id(target_user_id)
     if not target_user:
-        await callback.answer("Foydalanuvchi bazada topilmadi.", show_alert=True)
+        await callback.answer("Foydalanuvchi bazadan topilmadi.", show_alert=True)
         return
+
+    activation_key = generate_key_for_user(target_user_id)
+    set_user_status(
+        user_id=target_user_id,
+        status="approved",
+        activation_key=activation_key,
+    )
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"✅ <b>To'lov tasdiqlandi!</b>\n"
+                f"🆔 Foydalanuvchi ID: <code>{target_user_id}</code>\n"
+                f"🔑 Kalit: <code>{html.escape(activation_key)}</code>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error("Admin xabarini yangilashda xato: %s", repr(e))
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎉 <b>Tabriklaymiz! To'lovingiz tasdiqlandi.</b>\n\n"
+                f"🔑 Sizning aktivatsiya kodingiz:\n"
+                f"<code>{html.escape(activation_key)}</code>"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error("Foydalanuvchiga kalit yuborishda xato: %s", repr(e))
+
+    await callback.answer("To'lov tasdiqlandi va kalit yuborildi.")
+
+
+@dp.callback_query(F.data.startswith("reject_pay:"))
+async def handle_reject_payment(callback: CallbackQuery) -> None:
+    if not callback.from_user or callback.from_user.id != ADMIN_ID:
+        await callback.answer("Bu amal faqat administrator uchun!", show_alert=True)
+        return
+
+    if not callback.data:
+        return
+
+    try:
+        target_user_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Noto'g'ri foydalanuvchi ID.", show_alert=True)
+        return
+
+    target_user = get_user_by_id(target_user_id)
+    if not target_user:
+        await callback.answer("Foydalanuvchi bazadan topilmadi.", show_alert=True)
+        return
+
+    set_user_status(
+        user_id=target_user_id,
+        status="unpaid",
+        activation_key=None,
+    )
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"❌ <b>To'lov rad etildi.</b>\n"
+                f"🆔 Foydalanuvchi ID: <code>{target_user_id}</code>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.error("Admin rad etish xabarini yangilashda xato: %s", repr(e))
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "❌ <b>To'lovingiz tasdiqlanmadi.</b>\n"
+                "Iltimos, to'lov ma'lumotlarini tekshiring yoki qayta urinib ko'ring."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error("Foydalanuvchiga rad etish xabarini yuborishda xato: %s", repr(e))
+
+    await callback.answer("To'lov rad etildi.")
+
+
+@dp.message(F.text)
+async def handle_ai_message(message: Message) -> None:
+    if not message.from_user or not message.text:
+        return
+    prompt = message.text.strip()
+    if not prompt:
+        return
+
+    get_or_create_user(message.from_user)
+
+    try:
+        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    except Exception as e:
+        logger.warning("Typing holatini yuborishda xato: %s", repr(e))
+
+    try:
+        reply_text = await generate_ai_reply(prompt)
+    except asyncio.TimeoutError:
+        logger.error("AI so'rovi vaqti tugadi (user_id=%s)", message.from_user.id)
+        await message.answer(
+            "⏳ Javob olish vaqti tugadi. Iltimos, savolni qisqaroq qilib qayta yuboring.",
+            reply_markup=main_keyboard,
+        )
+        return
+    except Exception as e:
+        err_str = str(e).lower()
+        logger.error(
+            "AI javob qaytarishda xatolik (user_id=%s): %s",
+            message.from_user.id,
+            repr(e),
+            exc_info=True,
+        )
+        if "quota" in err_str or "resource_exhausted" in err_str or "429" in err_str:
+            user_msg = (
+                "⚠️ So'rovlar limiti vaqtincha tugadi. "
+                "Bir necha daqiqadan so'ng qayta urinib ko'ring."
+            )
+        else:
+            user_msg = (
+                "⚠️ Hozircha sun'iy intellekt bilan bog'lanishda xatolik yuz berdi. "
+                "Iltimos, birozdan so'ng qayta urinib ko'ring."
+            )
+        await message.answer(user_msg, reply_markup=main_keyboard)
+        return
+
+    chunk_size = 4000
+    for start in range(0, len(reply_text), chunk_size):
+        chunk = reply_text[start : start + chunk_size]
+        await message.answer(chunk)
+
+
+# 5. Ishga tushirish
+async def main() -> None:
+    init_db()
+    await log_available_models()
+    logger.info("Qalam bot polling rejimida ishga tushmoqda...")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
