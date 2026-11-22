@@ -400,7 +400,7 @@ async def handle_start(message: Message) -> None:
     if not message.from_user:
         return
     try:
-        get_or_create_user(message.from_user)
+        await asyncio.to_thread(get_or_create_user, message.from_user)
         greeting = (
             "Assalomu alaykum! <b>Qalam</b> sun'iy intellekt botiga xush kelibsiz.\n\n"
             "Savollaringizni yuboring — men sizga yordam beraman. "
@@ -478,4 +478,131 @@ async def handle_payment_menu(message: Message) -> None:
         logger.error("handle_payment_menu xatosi (user_id=%s): %s", user_id, repr(e), exc_info=True)
         await message.answer(
             "⚠️ To'lov ma'lumotlarini yuklashda vaqtinchalik xatolik yuz berdi. "
-            "I
+            "Iltimos, tugmani qayta bosing.",
+            reply_markup=main_keyboard,
+        )
+
+
+@dp.message(_is_key_button)
+async def handle_get_activation_key(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    logger.info("Aktivatsiya kodi tugmasi bosildi: user_id=%s", user_id)
+
+    try:
+        user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+        status = user_data.get("status")
+        activation_key = user_data.get("activation_key")
+
+        if status == "approved":
+            if not activation_key:
+                activation_key = generate_key_for_user(user_id)
+                await asyncio.to_thread(
+                    set_user_status,
+                    user_id,
+                    "approved",
+                    activation_key,
+                )
+            await message.answer(
+                f"🔑 <b>Sizning aktivatsiya kodingiz:</b>\n"
+                f"<code>{html.escape(str(activation_key))}</code>",
+                parse_mode="HTML",
+                reply_markup=main_keyboard,
+            )
+        elif status == "pending":
+            await message.answer(
+                "🔒 <b>Aktivatsiya kodi hali yopiq.</b>\n"
+                "To'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
+                parse_mode="HTML",
+                reply_markup=main_keyboard,
+            )
+        else:
+            await message.answer(
+                "🔒 <b>Aktivatsiya kodi yopiq (to'lov qilinmagan).</b>\n"
+                "Avval <b>«💳 5,000 UZS to'lash»</b> tugmasi orqali to'lovni amalga oshiring.",
+                parse_mode="HTML",
+                reply_markup=main_keyboard,
+            )
+    except Exception as e:
+        logger.error("handle_get_activation_key xatosi (user_id=%s): %s", user_id, repr(e), exc_info=True)
+        await message.answer(
+            "⚠️ Aktivatsiya kodini tekshirishda vaqtinchalik xatolik yuz berdi. "
+            "Iltimos, tugmani qayta bosing.",
+            reply_markup=main_keyboard,
+        )
+
+
+@dp.callback_query(F.data == "paid_confirm")
+async def handle_paid_confirm(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    try:
+        user_data = await asyncio.to_thread(get_or_create_user, callback.from_user)
+        user_id = user_data["user_id"]
+        full_name = user_data["full_name"] or "Noma'lum"
+        username_display = f"@{user_data['username']}" if user_data["username"] else "yo'q"
+
+        await asyncio.to_thread(set_user_status, user_id, "pending", None)
+
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "⏳ <b>To'lov tekshiruvga yuborildi.</b>\n"
+                    "Administrator to'lovni tekshirib tasdiqlashini kuting.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.error("Xabarni yangilashda xato: %s", repr(e))
+
+        admin_text = (
+            "📥 <b>Yangi to'lov so'rovi!</b>\n\n"
+            f"👤 Ism: <b>{html.escape(full_name)}</b>\n"
+            f"🔗 Username: {html.escape(username_display)}\n"
+            f"🆔 ID: <code>{user_id}</code>\n"
+            f"💰 Summa: <b>{html.escape(PRICE_TEXT)}</b>"
+        )
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text=admin_text,
+                parse_mode="HTML",
+                reply_markup=admin_approval_keyboard(user_id),
+            )
+        except Exception as e:
+            logger.error("Adminga xabar yuborishda xato: %s", repr(e))
+
+        await callback.answer("To'lov tekshiruvga yuborildi.", show_alert=False)
+    except Exception as e:
+        logger.error("handle_paid_confirm xatosi: %s", repr(e), exc_info=True)
+        await callback.answer("Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("approve_pay:"))
+async def handle_approve_payment(callback: CallbackQuery) -> None:
+    if not callback.from_user or callback.from_user.id != ADMIN_ID:
+        await callback.answer("Bu amal faqat administrator uchun!", show_alert=True)
+        return
+
+    if not callback.data:
+        return
+
+    try:
+        target_user_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Noto'g'ri foydalanuvchi ID.", show_alert=True)
+        return
+
+    target_user = await asyncio.to_thread(db_get_user, target_user_id)
+    if not target_user:
+        await callback.answer("Foydalanuvchi bazadan topilmadi.", show_alert=True)
+        return
+
+    activation_key = generate_key_for_user(target_user_id)
+    await asyncio.to_thread(set_user_status, target_user_id, "approved", activation_key)
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"✅ <b>To'lov tasdiqlandi!</b>\n"
+                f"🆔 Foydalanuvchi ID: <code>{target_user_id}
