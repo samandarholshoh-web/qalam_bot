@@ -1,2 +1,11 @@
-aiogram
-google-generativeai
+import os
+from google import genai
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Savol yuborish qismida:
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents=savol_matni,
+)
+javob = response.text
