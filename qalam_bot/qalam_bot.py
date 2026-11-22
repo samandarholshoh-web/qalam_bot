@@ -6,15 +6,20 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import random
 import string
-import google.generativeai as genai
+from google import genai
 
 # 1. Bu yerga o'zingizning botingiz tokeni va Gemini kalitingizni yozasiz
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # O'zingizning kalitingizni qo'shtirnoq ichiga yozasiz
 
 # Gemini AI ni sozlash
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+client = genai.Client(api_key=GEMINI_API_KEY)
+response = 
+client.models.generate_content(
+    model=gemini-2.5-flash",
+    contents=savol_matni,
+)
+javob - response.text
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
