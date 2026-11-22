@@ -66,7 +66,7 @@ async def handle_ai_query(message: types.Message):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=message.text,
         )
         ai_reply = response.text or "Javob qaytarilmadi, boshqa savol yozib ko'ring."
