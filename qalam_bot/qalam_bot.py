@@ -245,4 +245,44 @@ async def generate_ai_reply(prompt: str) -> str:
                     ),
                     timeout=REQUEST_TIMEOUT_SECONDS,
                 )
-                text = getattr(response, "text", None
+                text = getattr(response, "text", None)
+                if text and text.strip():
+                    logger.info(
+                        "AI javobi muvaffaqiyatli olindi: model=%s, urinish=%d/%d",
+                        model_name,
+                        attempt + 1,
+                        MAX_RETRIES_PER_MODEL,
+                    )
+                    return text.strip()
+                raise RuntimeError("Model bo'sh javob qaytardi.")
+            except asyncio.TimeoutError:
+                attempt_logs.append(f"{model_name}[{attempt + 1}]=TIMEOUT")
+                logger.warning(
+                    "Gemini timeout (%ss): model=%s, urinish=%d/%d",
+                    REQUEST_TIMEOUT_SECONDS,
+                    model_name,
+                    attempt + 1,
+                    MAX_RETRIES_PER_MODEL,
+                )
+            except Exception as e:
+                if _is_404_error(e):
+                    _unavailable_models.add(model_name)
+                    attempt_logs.append(f"{model_name}[{attempt + 1}]=404_NOT_FOUND")
+                    logger.warning(
+                        "Model topilmadi (404 NOT_FOUND), keyingi modelga o'tilmoqda: model=%s",
+                        model_name,
+                    )
+                    break
+
+                if _is_503_error(e):
+                    attempt_logs.append(f"{model_name}[{attempt + 1}]=503_UNAVAILABLE")
+                    logger.warning(
+                        "Gemini 503 UNAVAILABLE xatosi: model=%s, urinish=%d/%d",
+                        model_name,
+                        attempt + 1,
+                        MAX_RETRIES_PER_MODEL,
+                    )
+                else:
+                    attempt_logs.append(f"{model_name}[{attempt + 1}]={type(e).__name__}")
+                    logger.error(
+                        "Gemini xatosi: model=%
