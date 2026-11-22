@@ -1,95 +1,108 @@
 import asyncio
+import logging
 import os
-import random
-import string
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import CommandStart
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from google import genai
+
+logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable topilmadi!")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable topilmadi!")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+client = genai.Client(api_key=GEMINI_API_KEY.strip())
+
+MODELS = [
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
+
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="💳 5,000 UZS to'lash")],
+        [KeyboardButton(text="🔑 Aktivatsiya kodini olish")],
+    ],
+    resize_keyboard=True,
+)
 
 
-def generate_activation_token() -> str:
-    letters = string.ascii_uppercase + string.digits
-    return "".join(random.choice(letters) for _ in range(8))
+async def generate_ai_reply(prompt: str) -> str:
+    last_error = None
+
+    for model_name in MODELS:
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model_name,
+                contents=prompt,
+            )
+            if response and response.text and response.text.strip():
+                return response.text.strip()
+        except Exception as e:
+            logging.error(f"GEMINI ERROR ({model_name}): {repr(e)}")
+            last_error = e
+            continue
+
+    raise last_error or RuntimeError("Barcha modellar javob qaytarishda xatolik berdi.")
 
 
-@dp.message(Command("start"))
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💳 5,000 UZS to'lash", callback_data="pay_sub")
-    builder.button(text="🔑 Aktivatsiya kodini olish", callback_data="get_token")
-    builder.adjust(1)
-
     await message.answer(
-        "Assalomu alaykum! Qalam ilovasining sun'iy intellekt botiga xush kelibsiz.\n\n"
-        "Menga istalgan o'quv yoki fanlar bo'yicha savol yozib yuborishingiz mumkin, sun'iy intellekt javob beradi.",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown",
+        "Assalomu alaykum! Qalam sun'iy intellekt botiga xush kelibsiz.\n"
+        "Savolingizni yozing, sizga mamnuniyat bilan javob beraman.",
+        reply_markup=main_keyboard,
     )
 
 
-@dp.callback_query(lambda c: c.data == "pay_sub")
-async def process_pay(callback: types.CallbackQuery):
-    await callback.message.answer(
-        "💳 5,000 UZS to'lov ma'lumotlari keyinroq ulanadi.\n"
-        "Aktivatsiya kodi olish uchun «🔑 Aktivatsiya kodini olish» tugmasini bosing."
+@dp.message(F.text == "💳 5,000 UZS to'lash")
+async def handle_payment(message: types.Message):
+    await message.answer(
+        "5,000 UZS to'lov ma'lumotlari:\n"
+        "To'lovni amalga oshirgach, «🔑 Aktivatsiya kodini olish» tugmasidan foydalaning."
     )
-    await callback.answer()
 
 
-@dp.callback_query(lambda c: c.data == "get_token")
-async def process_token(callback: types.CallbackQuery):
-    activation_code = generate_activation_token()
-    await callback.message.answer(
-        f"✅ To'lov tasdiqlandi!\n\nSizning unikal aktivatsiya kodingiz:\n{activation_code}\n\n"
-        "Bu kodni Qalam ilovasidagi 'Aktivatsiya kodini kiritish' oynasiga kiriting.",
-        parse_mode="Markdown",
+@dp.message(F.text == "🔑 Aktivatsiya kodini olish")
+async def handle_activation(message: types.Message):
+    await message.answer(
+        "Aktivatsiya kodi bo'yicha ma'lumot olish uchun administratorga murojaat qiling."
     )
-    await callback.answer()
 
 
-@dp.message()
-async def handle_ai_query(message: types.Message):
-    if not message.text:
-        await message.answer("Iltimos, matn ko'rinishida savol yuboring.")
+@dp.message(F.text)
+async def handle_text(message: types.Message):
+    user_text = message.text.strip()
+    if not user_text:
         return
 
-    wait_msg = await message.answer("⏳ Sun'iy intellekt o'ylamoqda...")
-
     try:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=message.text,
-        )
-        ai_reply = response.text or "Javob qaytarilmadi, boshqa savol yozib ko'ring."
+        reply_text = await generate_ai_reply(user_text)
 
-        await message.answer(ai_reply, parse_mode="Markdown")
-        await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
+        # Telegram xabar uzunligi 4096 belgidan oshmasligi uchun bo'lib yuborish
+        for i in range(0, len(reply_text), 4000):
+            await message.answer(reply_text[i : i + 4000])
+
     except Exception as e:
-        print("GEMINI ERROR:", repr(e), flush=True)
-        try:
-            await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
-        except Exception:
-            pass
-        await message.answer("Xatolik yuz berdi, iltimos keyinroq qayta urinib ko'ring.")
+        logging.error(f"FINAL GEMINI ERROR: {repr(e)}")
+        await message.answer(
+            "Xatolik yuz berdi, iltimos keyinroq qayta urinib ko'ring."
+        )
 
 
 async def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN topilmadi! Railway Variables ichiga BOT_TOKEN kiriting.")
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY topilmadi! Railway Variables ichiga GEMINI_API_KEY kiriting.")
-
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__":
+if name == "main":
     asyncio.run(main())
