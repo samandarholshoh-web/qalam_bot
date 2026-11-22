@@ -14,12 +14,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # O'zingizning kalitingizni qo'shti
 
 # Gemini AI ni sozlash
 client = genai.Client(api_key=GEMINI_API_KEY)
-response = 
-client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=savol_matni,
-)
-javob = response.text
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -59,8 +53,11 @@ async def process_token(callback: types.CallbackQuery):
 async def handle_ai_query(message: types.Message):
     wait_msg = await message.answer("⏳ Sun'iy intellekt o'ylamoqda...")
     
-    try:
-        response = model.generate_content(message.text)
+    
+        response = client.models.generate_content(
+            model="gemini-2.5f-flash",
+            contents=message.text,
+        )
         ai_reply = response.text
         
         await message.answer(ai_reply, parse_mode="Markdown")
