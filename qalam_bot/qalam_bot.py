@@ -1,84 +1,85 @@
-import asyncio
-import logging
-import os
+@dp.callback_query(F.data.startswith("approve_pay:"))
+async def handle_approve_payment(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Faqat administrator tasdiqlay oladi.", show_alert=True)
+        return
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
-from google import genai
+    target_user_id = int(callback.data.split(":")[1])
+    key = generate_key_for_user(target_user_id)
+    set_user_status(target_user_id, "approved", key)
 
-logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable topilmadi!")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable topilmadi!")
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-client = genai.Client(api_key=GEMINI_API_KEY.strip())
-
-MODELS = [
-    "gemini-3.8-flash",
-]
-
-main_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="💳 5,000 UZS to'lash")],
-        [KeyboardButton(text="🔑 Aktivatsiya kodini olish")],
-    ],
-    resize_keyboard=True,
-)
-
-
-async def generate_ai_reply(prompt: str) -> str:
-    last_error = None
-
-    for model_name in MODELS:
-        for attempt in range(3):
-            try:
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=model_name,
-                    contents=prompt,
-                )
-                if response and response.text and response.text.strip():
-                    return response.text.strip()
-            except Exception as e:
-                logging.error(
-                    f"GEMINI ERROR ({model_name}, attempt {attempt + 1}): {repr(e)}"
-                )
-                last_error = e
-                await asyncio.sleep(1.5 * (attempt + 1))
-
-    raise last_error or RuntimeError("Model vaqtincha javob qaytarmadi.")
-
-
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Assalomu alaykum! Qalam sun'iy intellekt botiga xush kelibsiz.\n"
-        "Savolingizni yozing, sizga mamnuniyat bilan javob beraman.",
-        reply_markup=main_keyboard,
+    await callback.answer("To'lov tasdiqlandi va kalit ochildi!", show_alert=True)
+    await callback.message.edit_text(
+        callback.message.text + f"\n\n✅ <b>TASDIQLANDI</b>\n🔑 Kalit: <code>{key}</code>",
+        parse_mode="HTML",
     )
 
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"✅ <b>To'lovingiz tasdiqlandi!</b>\n\n"
+                f"🔑 Sizning aktivatsiya kodingiz:\n<code>{key}</code>\n\n"
+                f"Endi «🔑 Aktivatsiya kodini olish» tugmasi orqali ham kalitingizni ko'rishingiz mumkin."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.error(f"USER NOTIFY ERROR: {repr(e)}")
 
-@dp.message(F.text == "💳 5,000 UZS to'lash")
-async def handle_payment(message: types.Message):
-    await message.answer(
-        "5,000 UZS to'lov ma'lumotlari:\n"
-        "To'lovni amalga oshirgach, «🔑 Aktivatsiya kodini olish» tugmasidan foydalaning."
+
+@dp.callback_query(F.data.startswith("reject_pay:"))
+async def handle_reject_payment(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Faqat administrator rad eta oladi.", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split(":")[1])
+    set_user_status(target_user_id, "unpaid", None)
+
+    await callback.answer("To'lov rad etildi.", show_alert=True)
+    await callback.message.edit_text(
+        callback.message.text + "\n\n❌ <b>RAD ETILDI</b>",
+        parse_mode="HTML",
     )
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "❌ <b>To'lov hali tasdiqlanmadi</b>\n\n"
+                "Iltimos, to'lovni to'liq bajarganingizni tekshiring va qayta «💳 5,000 UZS to'lash» tugmasidan foydalaning. "
+                "To'lov tasdiqlanmaguncha aktivatsiya kodi ochilmaydi."
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.error(f"USER REJECT NOTIFY ERROR: {repr(e)}")
 
 
 @dp.message(F.text == "🔑 Aktivatsiya kodini olish")
 async def handle_activation(message: types.Message):
-    await message.answer(
-        "Aktivatsiya kodi bo'yicha ma'lumot olish uchun administratorga murojaat qiling."
-    )
+    user_data = get_or_create_user(message.from_user)
+
+    if user_data["status"] == "approved" and user_data["activation_key"]:
+        await message.answer(
+            f"🔑 <b>Sizning aktivatsiya kodingiz:</b>\n\n"
+            f"<code>{user_data['activation_key']}</code>",
+            parse_mode="HTML",
+        )
+    elif user_data["status"] == "pending":
+        await message.answer(
+            "🔒 <b>Aktivatsiya kodi hali yopiq</b>\n\n"
+            "To'lov so'rovingiz yuborilgan, lekin administrator hali tasdiqlamagani sababli kalit ochilmagan. "
+            "Tasdiqlangach shu tugmani qayta bosing."
+        )
+    else:
+        await message.answer(
+            f"🔒 <b>Aktivatsiya kodi yopiq</b>\n\n"
+            f"Kalitni olish uchun avval <b>«💳 5,000 UZS to'lash»</b> tugmasi orqali karta raqamiga (<code>{CARD_NUMBER}</code>) "
+            f"<b>{PRICE_TEXT}</b> to'lov qiling va to'lov tasdiqlanishini kuting.",
+            parse_mode="HTML",
+        )
 
 
 @dp.message(F.text)
@@ -101,6 +102,8 @@ async def handle_text(message: types.Message):
 
 
 async def main():
+    init_db()
+    await log_available_models()
     await dp.start_polling(bot)
 
 
