@@ -4,7 +4,9 @@ import html
 import logging
 import os
 import sqlite3
-from typing import Any, Dict, Optional
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -29,9 +31,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN muhit o'zgaruvchisi topilmadi!")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
+_raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or ""
+GEMINI_API_KEYS: List[str] = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+if not GEMINI_API_KEYS:
+    raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
 ADMIN_ID: int = 0
 CARD_NUMBER: str = ""
@@ -39,22 +42,65 @@ CARD_HOLDER: str = "QALAM XIZMATI"
 PRICE_TEXT: str = "5,000 UZS"
 
 DB_PATH = "bot_data.db"
-MODELS = ["gemini-3.8-flash"]
+MODELS: List[str] = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+]
+
+REQUEST_TIMEOUT_SECONDS: float = 12.0
+FALLBACK_PAUSE_SECONDS: float = 1.0
+USER_COOLDOWN_SECONDS: float = 2.5
+MAX_CONCURRENT_AI_REQUESTS: int = 40
 
 bot = Bot(token=BOT_TOKEN.strip())
 dp = Dispatcher()
-client = genai.Client(api_key=GEMINI_API_KEY.strip())
+
+_clients: List[genai.Client] = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
+_key_rr_index: int = 0
+_key_rr_lock = asyncio.Lock()
+_ai_concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AI_REQUESTS)
+_user_last_request_ts: Dict[int, float] = {}
+_user_active_locks: Dict[int, asyncio.Lock] = {}
 
 
-# 2. SQLite ma'lumotlar bazasi (bot_data.db)
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    lock = _user_active_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_active_locks[user_id] = lock
+    return lock
+
+
+async def _get_ordered_clients() -> List[Tuple[int, genai.Client]]:
+    global _key_rr_index
+    total = len(_clients)
+    async with _key_rr_lock:
+        start = _key_rr_index % total
+        _key_rr_index = (_key_rr_index + 1) % total
+    return [((start + offset) % total, _clients[(start + offset) % total]) for offset in range(total)]
+
+
+# 2. Ma'lumotlar bazasi qatlami (SQLite WAL + PostgreSQL'ga oson ko'chiriladigan struktura)
+@contextmanager
+def db_connection() -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def init_db() -> None:
-    with get_db_connection() as conn:
+def db_init_schema() -> None:
+    with db_connection() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -66,17 +112,14 @@ def init_db() -> None:
             )
             """
         )
-        conn.commit()
-    logger.info("SQLite baza tayyorlandi: %s", DB_PATH)
+    logger.info("SQLite baza WAL rejimida tayyorlandi: %s", DB_PATH)
 
 
-def get_or_create_user(user: types.User) -> Dict[str, Any]:
-    full_name = user.full_name or ""
-    username = user.username
-    with get_db_connection() as conn:
+def db_upsert_and_get_user(user_id: int, username: Optional[str], full_name: str) -> Dict[str, Any]:
+    with db_connection() as conn:
         row = conn.execute(
             "SELECT user_id, username, full_name, status, activation_key FROM users WHERE user_id = ?",
-            (user.id,),
+            (user_id,),
         ).fetchone()
         if row is None:
             conn.execute(
@@ -84,9 +127,8 @@ def get_or_create_user(user: types.User) -> Dict[str, Any]:
                 INSERT INTO users (user_id, username, full_name, status, activation_key)
                 VALUES (?, ?, ?, 'unpaid', NULL)
                 """,
-                (user.id, username, full_name),
+                (user_id, username, full_name),
             )
-            conn.commit()
         else:
             conn.execute(
                 """
@@ -94,18 +136,16 @@ def get_or_create_user(user: types.User) -> Dict[str, Any]:
                 SET username = ?, full_name = ?
                 WHERE user_id = ?
                 """,
-                (username, full_name, user.id),
+                (username, full_name, user_id),
             )
-            conn.commit()
-
         updated = conn.execute(
             "SELECT user_id, username, full_name, status, activation_key FROM users WHERE user_id = ?",
-            (user.id,),
+            (user_id,),
         ).fetchone()
         if updated:
             return dict(updated)
         return {
-            "user_id": user.id,
+            "user_id": user_id,
             "username": username,
             "full_name": full_name,
             "status": "unpaid",
@@ -113,8 +153,8 @@ def get_or_create_user(user: types.User) -> Dict[str, Any]:
         }
 
 
-def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
-    with get_db_connection() as conn:
+def db_get_user(user_id: int) -> Optional[Dict[str, Any]]:
+    with db_connection() as conn:
         row = conn.execute(
             "SELECT user_id, username, full_name, status, activation_key FROM users WHERE user_id = ?",
             (user_id,),
@@ -122,12 +162,12 @@ def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-def set_user_status(
+def db_set_user_status(
     user_id: int,
     status: str,
     activation_key: Optional[str] = None,
 ) -> None:
-    with get_db_connection() as conn:
+    with db_connection() as conn:
         conn.execute(
             """
             UPDATE users
@@ -136,7 +176,26 @@ def set_user_status(
             """,
             (status, activation_key, user_id),
         )
-        conn.commit()
+
+
+def init_db() -> None:
+    db_init_schema()
+
+
+def get_or_create_user(user: types.User) -> Dict[str, Any]:
+    return db_upsert_and_get_user(
+        user_id=user.id,
+        username=user.username,
+        full_name=user.full_name or "",
+    )
+
+
+def set_user_status(
+    user_id: int,
+    status: str,
+    activation_key: Optional[str] = None,
+) -> None:
+    db_set_user_status(user_id=user_id, status=status, activation_key=activation_key)
 
 
 def generate_key_for_user(user_id: int) -> str:
@@ -148,77 +207,89 @@ def generate_key_for_user(user_id: int) -> str:
     return f"QALAM-{part1}-{part2}"
 
 
-# 3. Gemini AI va loglash
+# 3. Gemini AI, Multi-model Fallback va loglash
 async def log_available_models() -> None:
     try:
-        models = await asyncio.wait_for(
-            asyncio.to_thread(client.models.list),
-            timeout=15,
+        primary_client = _clients[0]
+        models_iter = await asyncio.wait_for(
+            asyncio.to_thread(primary_client.models.list),
+            timeout=10.0,
         )
-        model_names = [getattr(m, "name", str(m)) for m in models]
-        logger.info("Mavjud Gemini modellari: %s", model_names)
+        model_names = [getattr(m, "name", str(m)) for m in models_iter]
+        logger.info(
+            "Mavjud Gemini modellari (%d ta kalit ulangan): %s",
+            len(_clients),
+            model_names,
+        )
     except Exception as e:
-        logger.error("Modellarni olishda xatolik yuz berdi: %s", repr(e), exc_info=True)
+        logger.error("Modellarni olishda xato (kalitlar soni=%d): %s", len(_clients), repr(e))
 
 
-async def _call_gemini_once(model_name: str, prompt: str) -> str:
-    if hasattr(client, "aio") and hasattr(client.aio, "models"):
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            ),
-            timeout=25,
-        )
-    else:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                client.models.generate_content,
-                model=model_name,
-                contents=prompt,
-            ),
-            timeout=25,
-        )
+def _extract_error_code(err: Exception) -> str:
+    text = str(err)
+    for code in ("503", "429", "500", "504", "403", "400"):
+        if code in text:
+            return code
+    return type(err).__name__
+
+
+async def _request_single_model(
+    ai_client: genai.Client,
+    model_name: str,
+    prompt: str,
+) -> str:
+    response = await asyncio.wait_for(
+        ai_client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        ),
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
     text = getattr(response, "text", None)
     if not text or not text.strip():
-        raise ValueError("Model bo'sh javob qaytardi.")
+        raise ValueError("Model bo'sh javob qaytardi")
     return text.strip()
 
 
 async def generate_ai_reply(prompt: str) -> str:
-    last_error: Optional[Exception] = None
+    ordered_clients = await _get_ordered_clients()
+    failure_summaries: List[str] = []
+
     for model_name in MODELS:
-        for attempt in range(4):
+        for key_idx, ai_client in ordered_clients:
             try:
-                reply = await _call_gemini_once(model_name, prompt)
+                reply = await _request_single_model(ai_client, model_name, prompt)
                 logger.info(
-                    "AI javob olindi (model=%s, urinish=%d/4)",
+                    "AI javob muvaffaqiyatli olindi: model=%s, key_index=%d",
                     model_name,
-                    attempt + 1,
+                    key_idx,
                 )
                 return reply
-            except asyncio.TimeoutError as e:
-                last_error = e
+            except asyncio.TimeoutError:
+                code = "TIMEOUT"
+                detail = f"{REQUEST_TIMEOUT_SECONDS}s limit tugadi"
+                failure_summaries.append(f"{model_name}[key#{key_idx}]={code}")
                 logger.warning(
-                    "Gemini so'rovi vaqti tugadi (model=%s, urinish=%d/4)",
+                    "Gemini timeout: model=%s, key_index=%d, sabab=%s",
                     model_name,
-                    attempt + 1,
+                    key_idx,
+                    detail,
                 )
             except Exception as e:
-                last_error = e
+                code = _extract_error_code(e)
+                failure_summaries.append(f"{model_name}[key#{key_idx}]={code}")
                 logger.error(
-                    "Gemini xatosi (model=%s, urinish=%d/4): %s",
+                    "Gemini xatosi: model=%s, key_index=%d, kod=%s, xato=%s",
                     model_name,
-                    attempt + 1,
+                    key_idx,
+                    code,
                     repr(e),
-                    exc_info=True,
                 )
 
-            if attempt < 3:
-                wait_seconds = 1.5 * (attempt + 1)
-                await asyncio.sleep(wait_seconds)
+            await asyncio.sleep(FALLBACK_PAUSE_SECONDS)
 
-    raise RuntimeError(f"Barcha urinishlar muvaffaqiyatsiz tugadi: {last_error}")
+    summary_text = ", ".join(failure_summaries)
+    raise RuntimeError(f"Barcha model va kalitlar urinildi: {summary_text}")
 
 
 # 4. Tugmalar va to'lov/aktivatsiya oqimi
@@ -400,7 +471,7 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
         await callback.answer("Noto'g'ri foydalanuvchi ID.", show_alert=True)
         return
 
-    target_user = get_user_by_id(target_user_id)
+    target_user = db_get_user(target_user_id)
     if not target_user:
         await callback.answer("Foydalanuvchi bazadan topilmadi.", show_alert=True)
         return
@@ -454,7 +525,7 @@ async def handle_reject_payment(callback: CallbackQuery) -> None:
         await callback.answer("Noto'g'ri foydalanuvchi ID.", show_alert=True)
         return
 
-    target_user = get_user_by_id(target_user_id)
+    target_user = db_get_user(target_user_id)
     if not target_user:
         await callback.answer("Foydalanuvchi bazadan topilmadi.", show_alert=True)
         return
@@ -498,47 +569,55 @@ async def handle_ai_message(message: Message) -> None:
     if not prompt:
         return
 
-    get_or_create_user(message.from_user)
+    user_id = message.from_user.id
+    user_lock = _get_user_lock(user_id)
 
-    try:
-        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    except Exception as e:
-        logger.warning("Typing holatini yuborishda xato: %s", repr(e))
-
-    try:
-        reply_text = await generate_ai_reply(prompt)
-    except asyncio.TimeoutError:
-        logger.error("AI so'rovi vaqti tugadi (user_id=%s)", message.from_user.id)
+    if user_lock.locked():
         await message.answer(
-            "⏳ Javob olish vaqti tugadi. Iltimos, savolni qisqaroq qilib qayta yuboring.",
+            "⏳ Oldingi so'rovingiz hali bajarilmoqda. Javob kelguncha biroz kuting.",
             reply_markup=main_keyboard,
         )
         return
-    except Exception as e:
-        err_str = str(e).lower()
-        logger.error(
-            "AI javob qaytarishda xatolik (user_id=%s): %s",
-            message.from_user.id,
-            repr(e),
-            exc_info=True,
+
+    now = time.monotonic()
+    last_ts = _user_last_request_ts.get(user_id, 0.0)
+    if now - last_ts < USER_COOLDOWN_SECONDS:
+        remaining = round(USER_COOLDOWN_SECONDS - (now - last_ts), 1)
+        await message.answer(
+            f"⏱ Iltimos, ketma-ket xabar yuborishda {remaining} soniya kuting.",
+            reply_markup=main_keyboard,
         )
-        if "quota" in err_str or "resource_exhausted" in err_str or "429" in err_str:
-            user_msg = (
-                "⚠️ So'rovlar limiti vaqtincha tugadi. "
-                "Bir necha daqiqadan so'ng qayta urinib ko'ring."
-            )
-        else:
-            user_msg = (
-                "⚠️ Hozircha sun'iy intellekt bilan bog'lanishda xatolik yuz berdi. "
-                "Iltimos, birozdan so'ng qayta urinib ko'ring."
-            )
-        await message.answer(user_msg, reply_markup=main_keyboard)
         return
 
-    chunk_size = 4000
-    for start in range(0, len(reply_text), chunk_size):
-        chunk = reply_text[start : start + chunk_size]
-        await message.answer(chunk)
+    async with user_lock:
+        _user_last_request_ts[user_id] = time.monotonic()
+        get_or_create_user(message.from_user)
+
+        try:
+            await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        except Exception as e:
+            logger.warning("Typing holatini yuborishda xato (user_id=%s): %s", user_id, repr(e))
+
+        async with _ai_concurrency_semaphore:
+            try:
+                reply_text = await generate_ai_reply(prompt)
+            except Exception as e:
+                logger.error(
+                    "Barcha AI urinishlari muvaffaqiyatsiz (user_id=%s): %s",
+                    user_id,
+                    repr(e),
+                )
+                await message.answer(
+                    "⚠️ Hozir sun'iy intellekt serverlari vaqtincha yuqori yuklama bilan ishlamoqda "
+                    "yoki limit tugagan. Iltimos, 10–15 soniyadan so'ng qayta urinib ko'ring.",
+                    reply_markup=main_keyboard,
+                )
+                return
+
+        chunk_size = 4000
+        for start in range(0, len(reply_text), chunk_size):
+            chunk = reply_text[start : start + chunk_size]
+            await message.answer(chunk)
 
 
 # 5. Ishga tushirish
