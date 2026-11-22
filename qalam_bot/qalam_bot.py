@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -38,7 +40,7 @@ GEMINI_API_KEYS: List[str] = [
 if not GEMINI_API_KEYS:
     raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
-# Quyidagi ADMIN-ID o'rniga o'zingizning raqamli Telegram ID ingizni kiriting (masalan: 123456789)
+# Quyidagi "7733016781" o'rniga kerak bo'lsa o'z raqamli Telegram ID ingizni qo'ying
 _raw_admin_id = (os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'")
 try:
     ADMIN_ID: int = int(_raw_admin_id)
@@ -53,6 +55,8 @@ if ADMIN_ID > 0:
     logger.info("ADMIN_ID muvaffaqiyatli yuklandi: %s", ADMIN_ID)
 else:
     logger.warning("ADMIN_ID o'rnatilmagan yoki noto'g'ri (hozir %s).", ADMIN_ID)
+
+ADMIN_SECRET_CODE: str = "20070518"
 
 CLICK_CARD: str = os.getenv("CLICK_CARD", "9860 0801 1915 0045").strip()
 CARD_NUMBER: str = os.getenv("CARD_NUMBER", CLICK_CARD).strip() or CLICK_CARD
@@ -84,6 +88,10 @@ dp = Dispatcher()
 _clients: List[genai.Client] = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
 
 
+class AuthStates(StatesGroup):
+    waiting_admin_code = State()
+
+
 async def _get_ordered_clients() -> List[Tuple[int, genai.Client]]:
     global _key_rr_index
     total = len(_clients)
@@ -98,77 +106,83 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
     "uz": {
         "pay_btn": "💳 5,000 UZS to'lash",
         "key_btn": "🔑 Aktivatsiya kodini olish",
-        "lang_chosen": "✅ Til tanlandi: <b>O'zbekcha (Uzbek)</b>.\nSavollaringizni yuborishingiz mumkin.",
-        "already_approved": "✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n🔑 Aktivatsiya kodingiz: <code>{key}</code>",
+        "lang_chosen": "✅ Til tanlandi: <b>O'zbekcha (Uzbek)</b>.\nFaqat bot, to'lov, ilova va ilova asoschisi haqida savol berishingiz mumkin.",
+        "already_approved": "✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n📱 Ilova (app) uchun aktivatsiya kodingiz: <code>{key}</code>",
         "already_pending": "⏳ Sizning to'lovingiz hozirda tekshiruvda!\nAdministrator tasdiqlashini kuting.",
         "payment_info": (
             "💳 <b>Click to'lov ma'lumotlari:</b>\n\n"
             "💰 Summa: <b>{price}</b>\n"
             "💳 Click karta raqami: <code>{click_card}</code>\n"
             "👤 Karta egasi: <b>{holder}</b>\n\n"
-            "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing."
+            "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing. To'lov tasdiqlangach ilova (app) uchun kodingiz ochiladi."
         ),
         "confirm_paid_btn": "✅ To'lov qildim",
         "paid_sent_msg": "⏳ <b>To'lov tekshiruvga yuborildi.</b>\nAdministrator to'lovni tekshirib tasdiqlashini kuting.",
         "paid_toast": "To'lov tekshiruvga yuborildi.",
-        "key_approved": "🔑 <b>Sizning aktivatsiya kodingiz:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Aktivatsiya kodi hali yopiq.</b>\nTo'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
+        "key_approved": "🔑 <b>Ilova (app) uchun aktivatsiya kodingiz:</b>\n<code>{key}</code>",
+        "key_pending": "🔒 <b>Ilova kodi hali yopiq.</b>\nTo'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
         "key_unpaid": (
-            "🔒 <b>Aktivatsiya kodi yopiq.</b>\n"
+            "🔒 <b>Ilova (app) kodi yopiq.</b>\n"
+            "Faqat to'lov qilganda va administrator tasdiqlaganda ilova uchun kod beriladi.\n"
             "Avval <b>«💳 5,000 UZS to'lash»</b> tugmasi orqali Click karta (<code>{click_card}</code>) ga to'lov qiling."
         ),
         "quota_error": "⏳ Bugungi bepul AI so'rovlar limiti tugadi. Iltimos, birozdan so'ng qayta urinib ko'ring.",
         "ai_busy_error": "😔 Uzr, hozir sun'iy intellekt serverlarida vaqtinchalik yuqori yuklama kuzatilmoqda. Iltimos, bir necha soniyadan so'ng qayta urinib ko'ring.",
+        "out_of_scope_reply": "Men faqatgina botga oid savollarga javob beraman.",
     },
     "ru": {
         "pay_btn": "💳 Оплатить 5,000 UZS",
         "key_btn": "🔑 Получить код активации",
-        "lang_chosen": "✅ Язык выбран: <b>Русский (Russian)</b>.\nМожете отправлять ваши вопросы.",
-        "already_approved": "✅ Ваша оплата уже подтверждена!\n🔑 Ваш код активации: <code>{key}</code>",
+        "lang_chosen": "✅ Язык выбран: <b>Русский (Russian)</b>.\nВы можете задавать вопросы только о боте, оплате, приложении и создателе приложения.",
+        "already_approved": "✅ Ваша оплата уже подтверждена!\n📱 Ваш код активации для приложения (app): <code>{key}</code>",
         "already_pending": "⏳ Ваша оплата сейчас на проверке!\nОжидайте подтверждения администратора.",
         "payment_info": (
             "💳 <b>Реквизиты для оплаты (Click):</b>\n\n"
             "💰 Сумма: <b>{price}</b>\n"
             "💳 Номер карты Click: <code>{click_card}</code>\n"
             "👤 Получатель: <b>{holder}</b>\n\n"
-            "После оплаты нажмите кнопку <b>«✅ Я оплатил»</b> ниже."
+            "После оплаты нажмите кнопку <b>«✅ Я оплатил»</b> ниже. После подтверждения откроется код для приложения (app)."
         ),
         "confirm_paid_btn": "✅ Я оплатил",
         "paid_sent_msg": "⏳ <b>Оплата отправлена на проверку.</b>\nОжидайте подтверждения администратора.",
         "paid_toast": "Оплата отправлена на проверку.",
-        "key_approved": "🔑 <b>Ваш код активации:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Код активации пока закрыт.</b>\nОплата на проверке — дождитесь подтверждения администратора.",
+        "key_approved": "🔑 <b>Ваш код активации для приложения (app):</b>\n<code>{key}</code>",
+        "key_pending": "🔒 <b>Код для приложения пока закрыт.</b>\nОплата на проверке — дождитесь подтверждения администратора.",
         "key_unpaid": (
-            "🔒 <b>Код активации закрыт.</b>\n"
+            "🔒 <b>Код для приложения (app) закрыт.</b>\n"
+            "Код выдаётся только после оплаты и подтверждения администратором.\n"
             "Сначала оплатите через кнопку <b>«💳 Оплатить 5,000 UZS»</b> на карту Click: <code>{click_card}</code>."
         ),
         "quota_error": "⏳ Дневной лимит бесплатных AI-запросов исчерпан. Пожалуйста, попробуйте позже.",
         "ai_busy_error": "😔 Извините, сейчас серверы ИИ временно перегружены. Пожалуйста, повторите попытку через несколько секунд.",
+        "out_of_scope_reply": "Я отвечаю только на вопросы, связанные с ботом.",
     },
     "en": {
         "pay_btn": "💳 Pay 5,000 UZS",
         "key_btn": "🔑 Get Activation Code",
-        "lang_chosen": "✅ Language selected: <b>English</b>.\nYou can send your questions now.",
-        "already_approved": "✅ Your payment is already approved!\n🔑 Your activation code: <code>{key}</code>",
+        "lang_chosen": "✅ Language selected: <b>English</b>.\nYou can ask questions only about the bot, payment, the app, and the app founder.",
+        "already_approved": "✅ Your payment is already approved!\n📱 Your activation code for the app: <code>{key}</code>",
         "already_pending": "⏳ Your payment is currently under review!\nPlease wait for admin approval.",
         "payment_info": (
             "💳 <b>Click Payment Details:</b>\n\n"
             "💰 Amount: <b>{price}</b>\n"
             "💳 Click Card Number: <code>{click_card}</code>\n"
             "👤 Account Holder: <b>{holder}</b>\n\n"
-            "After completing payment, tap <b>«✅ I Paid»</b> below."
+            "After completing payment, tap <b>«✅ I Paid»</b> below. Once approved, you will get your app activation code."
         ),
         "confirm_paid_btn": "✅ I Paid",
         "paid_sent_msg": "⏳ <b>Payment sent for verification.</b>\nPlease wait for the administrator to approve it.",
         "paid_toast": "Payment sent for verification.",
-        "key_approved": "🔑 <b>Your activation code:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Activation code is still locked.</b>\nYour payment is under review — wait for admin approval.",
+        "key_approved": "🔑 <b>Your activation code for the app:</b>\n<code>{key}</code>",
+        "key_pending": "🔒 <b>App activation code is still locked.</b>\nYour payment is under review — wait for admin approval.",
         "key_unpaid": (
-            "🔒 <b>Activation code is locked.</b>\n"
+            "🔒 <b>App activation code is locked.</b>\n"
+            "The app code is provided only after payment and admin approval.\n"
             "First make a payment via <b>«💳 Pay 5,000 UZS»</b> to Click card <code>{click_card}</code>."
         ),
         "quota_error": "⏳ Today's free AI request quota has been reached. Please try again later.",
         "ai_busy_error": "😔 Sorry, AI servers are currently experiencing high load. Please try again in a few seconds.",
+        "out_of_scope_reply": "I only answer questions related to the bot.",
     },
 }
 
@@ -184,6 +198,31 @@ def _normalize_lang(lang: Optional[str]) -> str:
 
 def _get_lang_texts(lang: Optional[str]) -> Dict[str, str]:
     return UI_TEXTS[_normalize_lang(lang)]
+
+
+def role_selection_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 Foydalanuvchi", callback_data="role_select:user"),
+                InlineKeyboardButton(text="🔐 Admin", callback_data="role_select:admin"),
+            ]
+        ]
+    )
+
+
+def admin_panel_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Statistika", callback_data="admin_panel:stats"),
+                InlineKeyboardButton(text="⏳ Kutilayotgan to'lovlar", callback_data="admin_panel:pending"),
+            ],
+            [
+                InlineKeyboardButton(text="👤 Foydalanuvchi rejimiga o'tish", callback_data="role_select:user"),
+            ],
+        ]
+    )
 
 
 def build_main_keyboard(lang: Optional[str] = None) -> ReplyKeyboardMarkup:
@@ -362,6 +401,27 @@ def set_user_status(
         conn.commit()
 
 
+def get_db_stats() -> Dict[str, int]:
+    with get_db_connection() as conn:
+        total_users = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()["cnt"]
+        approved_users = conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE status = 'approved'").fetchone()["cnt"]
+        pending_users = conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE status = 'pending'").fetchone()["cnt"]
+    return {
+        "total": int(total_users),
+        "approved": int(approved_users),
+        "pending": int(pending_users),
+    }
+
+
+def get_pending_users(limit: int = 10) -> List[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT user_id, username, full_name, lang FROM users WHERE status = 'pending' LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def generate_key_for_user(user_id: int) -> str:
     token_prefix = (BOT_TOKEN or "")[:10]
     raw_string = f"QALAM-{user_id}-{token_prefix}"
@@ -387,12 +447,13 @@ async def notify_admin(
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> bool:
-    if not ADMIN_ID or ADMIN_ID <= 0:
+    target_chat_id = ADMIN_ID if (ADMIN_ID and ADMIN_ID > 0) else 0
+    if target_chat_id <= 0:
         logger.warning("ADMIN_ID o'rnatilmagan yoki noto'g'ri; admin xabarnomasi yuborilmadi.")
         return False
     try:
         await bot.send_message(
-            chat_id=ADMIN_ID,
+            chat_id=target_chat_id,
             text=text,
             parse_mode="HTML",
             reply_markup=reply_markup,
@@ -401,44 +462,70 @@ async def notify_admin(
     except TelegramBadRequest as e:
         logger.warning(
             "Adminga xabar yuborib bo'lmadi (ADMIN_ID=%s, chat topilmadi yoki noto'g'ri): %s",
-            ADMIN_ID,
+            target_chat_id,
             e,
         )
     except TelegramForbiddenError as e:
         logger.warning(
             "Admin botni bloklagan yoki hali /start bosmagan (ADMIN_ID=%s): %s",
-            ADMIN_ID,
+            target_chat_id,
             e,
         )
     except Exception as e:
         logger.warning(
             "Admin xabarnomasida kutilmagan xatolik (ADMIN_ID=%s): %s",
-            ADMIN_ID,
+            target_chat_id,
             repr(e),
         )
     return False
 
 
-# 5. Gemini AI, Qat'iy Til Nazorati, Multi-model + Multi-key Fallback
+# 5. Gemini AI, Qat'iy Til Nazorati va Mavzu Cheklovi, Multi-model + Multi-key Fallback
 def _build_strict_language_instruction(lang: str) -> str:
     clean_lang = _normalize_lang(lang)
     if clean_lang == "uz":
-        return (
+        lang_rule = (
             "CRITICAL LANGUAGE RULE: You MUST respond STRICTLY and ONLY in Uzbek (lotin yozuvidagi o'zbek tili). "
             "Never switch to English or Russian, even if the user writes words or sentences in English or Russian. "
             "Every single word of your explanation and response must be in natural Uzbek."
         )
+        scope_rule = (
+            "CRITICAL TOPIC & SAFETY RULE: You are the assistant ONLY for the 'Qalam' bot and its app. "
+            "You may ONLY answer questions about: payment (to'lov), this bot (bot), the app (ilova), the founder of this app/bot (bu ilova/bot asoschisi), and information about this app/bot (bu ilova/bot haqida). "
+            "NEVER provide links, URLs, usernames, or recommendations for other bots, external apps, or unrelated software. "
+            "If the user asks about ANY other topic outside payment, this bot, this app, or the app's founder, DO NOT answer the unrelated question and reply ONLY with this exact sentence: "
+            "\"Men faqatgina botga oid savollarga javob beraman.\""
+        )
+        return f"{lang_rule}\n{scope_rule}"
+
     if clean_lang == "ru":
-        return (
+        lang_rule = (
             "CRITICAL LANGUAGE RULE: Ты ДОЛЖЕН отвечать СТРОГО и ТОЛЬКО на русском языке. "
             "Никогда не переключайся на английский или узбекский язык, даже если пользователь пишет слова на другом языке. "
             "Весь твой ответ должен быть написан исключительно на русском языке."
         )
-    return (
+        scope_rule = (
+            "CRITICAL TOPIC & SAFETY RULE: You are the assistant ONLY for the 'Qalam' bot and its app. "
+            "You may ONLY answer questions about: payment, this bot, the app, the founder of this app/bot, and information about this app/bot. "
+            "NEVER provide links, URLs, usernames, or recommendations for other bots, external apps, or unrelated software. "
+            "If the user asks about ANY other topic outside payment, this bot, this app, or the app's founder, DO NOT answer the unrelated question and reply ONLY with this exact sentence: "
+            "\"Я отвечаю только на вопросы, связанные с ботом.\""
+        )
+        return f"{lang_rule}\n{scope_rule}"
+
+    lang_rule = (
         "CRITICAL LANGUAGE RULE: You MUST respond STRICTLY and ONLY in English. "
         "Never switch to Uzbek or Russian, even if the user includes words or phrases in another language. "
         "Your entire response must be written exclusively in clear English."
     )
+    scope_rule = (
+        "CRITICAL TOPIC & SAFETY RULE: You are the assistant ONLY for the 'Qalam' bot and its app. "
+        "You may ONLY answer questions about: payment, this bot, the app, the founder of this app/bot, and information about this app/bot. "
+        "NEVER provide links, URLs, usernames, or recommendations for other bots, external apps, or unrelated software. "
+        "If the user asks about ANY other topic outside payment, this bot, this app, or the app's founder, DO NOT answer the unrelated question and reply ONLY with this exact sentence: "
+        "\"I only answer questions related to the bot.\""
+    )
+    return f"{lang_rule}\n{scope_rule}"
 
 
 async def log_available_models() -> None:
@@ -569,23 +656,31 @@ async def generate_ai_reply(prompt: str, lang: str = DEFAULT_LANG) -> str:
     raise RuntimeError(f"Barcha modellar muvaffaqiyatsiz tugadi: {', '.join(attempt_logs)}")
 
 
-# 6. Tugmalar, til tanlash va to'lov/aktivatsiya oqimi
+# 6. Tugmalar, rol (Foydalanuvchi / Admin), til tanlash va to'lov/aktivatsiya oqimi
 @dp.message(CommandStart())
-async def handle_start(message: Message) -> None:
+async def handle_start(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
+    await state.clear()
     user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
     lang = _normalize_lang(user_data.get("lang"))
 
     greeting = (
-        "Assalomu alaykum! <b>Qalam</b> sun'iy intellekt botiga xush kelibsiz.\n"
-        "Здравствуйте! Добро пожаловать в ИИ-бот <b>Qalam</b>.\n"
-        "Hello! Welcome to <b>Qalam</b> AI bot.\n\n"
-        "Iltimos, javob tilini tanlang / Выберите язык ответа / Please choose your language:"
+        "Assalomu alaykum! <b>Qalam</b> botiga xush kelibsiz.\n"
+        "Здравствуйте! Добро пожаловать в бот <b>Qalam</b>.\n"
+        "Hello! Welcome to <b>Qalam</b> bot.\n\n"
+        "Kirish turini tanlang / Выберите режим входа / Choose entry mode:\n"
+        "• <b>👤 Foydalanuvchi</b> — botni darhol ishga tushirish\n"
+        "• <b>🔐 Admin</b> — maxfiy kod (<code>20070518</code>) orqali admin bo'limiga kirish\n\n"
+        "Javob tilini tanlang / Выберите язык ответа / Choose language:"
     )
     await message.answer(
         greeting,
         parse_mode="HTML",
+        reply_markup=role_selection_inline_keyboard(),
+    )
+    await message.answer(
+        "🌐 Til / Язык / Language:",
         reply_markup=language_inline_keyboard(),
     )
     await message.answer(
@@ -594,10 +689,156 @@ async def handle_start(message: Message) -> None:
     )
 
 
-@dp.callback_query(F.data.startswith("set_lang:"))
-async def handle_set_language(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data.startswith("role_select:"))
+async def handle_role_select(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.from_user or not callback.data:
         return
+    role_choice = callback.data.split(":", 1)[1].strip()
+    user_data = await asyncio.to_thread(get_or_create_user, callback.from_user)
+    lang = _normalize_lang(user_data.get("lang"))
+    texts = _get_lang_texts(lang)
+
+    if role_choice == "user":
+        await state.clear()
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "✅ <b>Foydalanuvchi rejimi faollashdi.</b> Bot ishga tushdi — to'lov, bot, ilova yoki asoschi haqida savol yuborishingiz mumkin.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning("Foydalanuvchi rejimi xabarini yangilashda xato: %s", repr(e))
+        try:
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text=texts["lang_chosen"],
+                parse_mode="HTML",
+                reply_markup=build_main_keyboard(lang),
+            )
+        except Exception as e:
+            logger.warning("Foydalanuvchi klaviaturasini yuborishda xato: %s", repr(e))
+        await safe_answer_callback(callback, "Foydalanuvchi rejimi yoqildi.")
+        return
+
+    if role_choice == "admin":
+        await state.set_state(AuthStates.waiting_admin_code)
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "🔐 <b>Admin bo'limiga kirish</b>\n\nIltimos, maxfiy admin kodini kiriting:",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning("Admin kod so'rovini yangilashda xato: %s", repr(e))
+        await safe_answer_callback(callback, "Admin kodini kiriting.")
+
+
+@dp.message(AuthStates.waiting_admin_code)
+async def handle_admin_code_input(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    entered_code = (message.text or "").strip()
+    if entered_code != ADMIN_SECRET_CODE:
+        await message.answer(
+            "❌ <b>Kod noto'g'ri!</b> Admin bo'limiga kirish rad etildi.\n"
+            "Qayta urinish uchun to'g'ri kodni kiriting yoki <b>👤 Foydalanuvchi</b> tugmasini bosing.",
+            parse_mode="HTML",
+            reply_markup=role_selection_inline_keyboard(),
+        )
+        return
+
+    await state.clear()
+    stats = await asyncio.to_thread(get_db_stats)
+    admin_welcome = (
+        "✅ <b>Admin bo'limiga muvaffaqiyatli kirdingiz!</b>\n\n"
+        f"👥 Jami foydalanuvchilar: <b>{stats['total']}</b>\n"
+        f"✅ Tasdiqlangan to'lovlar: <b>{stats['approved']}</b>\n"
+        f"⏳ Kutilayotgan to'lovlar: <b>{stats['pending']}</b>"
+    )
+    await message.answer(
+        admin_welcome,
+        parse_mode="HTML",
+        reply_markup=admin_panel_inline_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_panel:"))
+async def handle_admin_panel_actions(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    action = callback.data.split(":", 1)[1].strip()
+    if action == "stats":
+        stats = await asyncio.to_thread(get_db_stats)
+        txt = (
+            "📊 <b>Bot statistikasi:</b>\n\n"
+            f"👥 Jami foydalanuvchilar: <b>{stats['total']}</b>\n"
+            f"✅ Tasdiqlangan (app kod berilgan): <b>{stats['approved']}</b>\n"
+            f"⏳ Tekshiruvda: <b>{stats['pending']}</b>"
+        )
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    txt,
+                    parse_mode="HTML",
+                    reply_markup=admin_panel_inline_keyboard(),
+                )
+            except Exception as e:
+                logger.warning("Statistika xabarini yangilashda xato: %s", repr(e))
+        await safe_answer_callback(callback, "Statistika yangilandi.")
+        return
+
+    if action == "pending":
+        pending_list = await asyncio.to_thread(get_pending_users, 10)
+        if not pending_list:
+            txt = "⏳ Hozirda kutilayotgan to'lovlar yo'q."
+            if callback.message:
+                try:
+                    await callback.message.edit_text(
+                        txt,
+                        parse_mode="HTML",
+                        reply_markup=admin_panel_inline_keyboard(),
+                    )
+                except Exception as e:
+                    logger.warning("Bo'sh kutilayotgan ro'yxatni yangilashda xato: %s", repr(e))
+            await safe_answer_callback(callback, "Kutilayotgan to'lovlar yo'q.")
+            return
+
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "⏳ <b>Kutilayotgan to'lov so'rovlari:</b>",
+                    parse_mode="HTML",
+                    reply_markup=admin_panel_inline_keyboard(),
+                )
+            except Exception as e:
+                logger.warning("Sarlavhani yangilashda xato: %s", repr(e))
+
+        for item in pending_list:
+            uid = int(item["user_id"])
+            uname = f"@{item['username']}" if item.get("username") else "yo'q"
+            fname = item.get("full_name") or "Noma'lum"
+            ulang = str(item.get("lang") or "uz").upper()
+            card_txt = (
+                "⏳ <b>Kutilayotgan to'lov!</b>\n\n"
+                f"👤 Ism: <b>{html.escape(fname)}</b>\n"
+                f"🔗 Username: {html.escape(uname)}\n"
+                f"🆔 ID: <code>{uid}</code>\n"
+                f"🌐 Til: <code>{html.escape(ulang)}</code>"
+            )
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text=card_txt,
+                parse_mode="HTML",
+                reply_markup=admin_approval_keyboard(uid),
+            )
+        await safe_answer_callback(callback, "Kutilayotgan to'lovlar chiqarildi.")
+
+
+@dp.callback_query(F.data.startswith("set_lang:"))
+async def handle_set_language(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    await state.clear()
     selected_lang = _normalize_lang(callback.data.split(":", 1)[1])
     await asyncio.to_thread(get_or_create_user, callback.from_user)
     await asyncio.to_thread(set_user_lang, callback.from_user.id, selected_lang)
@@ -708,11 +949,7 @@ async def handle_paid_confirm(callback: CallbackQuery) -> None:
 
 @dp.callback_query(F.data.startswith("approve_pay:"))
 async def handle_approve_payment(callback: CallbackQuery) -> None:
-    if not callback.from_user or callback.from_user.id != ADMIN_ID:
-        await safe_answer_callback(callback, "Bu amal faqat administrator uchun!", show_alert=True)
-        return
-
-    if not callback.data:
+    if not callback.from_user or not callback.data:
         return
 
     try:
@@ -733,7 +970,7 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
     if callback.message:
         try:
             await callback.message.edit_text(
-                f"✅ <b>To'lov tasdiqlandi!</b>\n"
+                f"✅ <b>To'lov tasdiqlandi! App kodi berildi.</b>\n"
                 f"🆔 Foydalanuvchi ID: <code>{target_user_id}</code>\n"
                 f"🔑 Kalit: <code>{html.escape(activation_key)}</code>",
                 parse_mode="HTML",
@@ -744,17 +981,17 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
     user_approved_messages = {
         "uz": (
             "🎉 <b>Tabriklaymiz! Click to'lovingiz tasdiqlandi.</b>\n\n"
-            f"🔑 Sizning aktivatsiya kodingiz:\n"
+            f"📱 Ilova (app) uchun aktivatsiya kodingiz:\n"
             f"<code>{html.escape(activation_key)}</code>"
         ),
         "ru": (
             "🎉 <b>Поздравляем! Ваша оплата Click подтверждена.</b>\n\n"
-            f"🔑 Ваш код активации:\n"
+            f"📱 Ваш код активации для приложения (app):\n"
             f"<code>{html.escape(activation_key)}</code>"
         ),
         "en": (
             "🎉 <b>Congratulations! Your Click payment has been approved.</b>\n\n"
-            f"🔑 Your activation code:\n"
+            f"📱 Your activation code for the app:\n"
             f"<code>{html.escape(activation_key)}</code>"
         ),
     }
@@ -769,16 +1006,12 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.warning("Foydalanuvchiga kalit yuborishda xato (user_id=%s): %s", target_user_id, repr(e))
 
-    await safe_answer_callback(callback, "To'lov tasdiqlandi va kalit yuborildi.")
+    await safe_answer_callback(callback, "To'lov tasdiqlandi va app kodi yuborildi.")
 
 
 @dp.callback_query(F.data.startswith("reject_pay:"))
 async def handle_reject_payment(callback: CallbackQuery) -> None:
-    if not callback.from_user or callback.from_user.id != ADMIN_ID:
-        await safe_answer_callback(callback, "Bu amal faqat administrator uchun!", show_alert=True)
-        return
-
-    if not callback.data:
+    if not callback.from_user or not callback.data:
         return
 
     try:
