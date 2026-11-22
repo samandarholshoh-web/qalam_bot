@@ -24,59 +24,39 @@ from aiogram.types import (
 from google import genai
 from google.genai import types as genai_types
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("qalam_bot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN muhit o'zgaruvchisi topilmadi!")
+    raise ValueError("BOT_TOKEN topilmadi!")
 
 _raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or ""
-GEMINI_API_KEYS: List[str] = [
-    k.strip().strip("\"'") for k in _raw_keys.split(",") if k.strip().strip("\"'")
-]
+GEMINI_API_KEYS = [k.strip().strip("\"'") for k in _raw_keys.split(",") if k.strip().strip("\"'")]
 if not GEMINI_API_KEYS:
     raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY topilmadi!")
 
-_raw_admin_id = (os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'")
 try:
-    ADMIN_ID: int = int(_raw_admin_id)
+    ADMIN_ID = int((os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'"))
 except ValueError:
     ADMIN_ID = 0
 
-ADMIN_SECRET_CODE: str = "20070518"
-CLICK_CARD: str = os.getenv("CLICK_CARD", "9860 0801 1915 0045").strip()
-CARD_HOLDER: str = "QALAM XIZMATI"
-PRICE_TEXT: str = "5,000 UZS"
-
-DEFAULT_LANG: str = "uz"
-SUPPORTED_LANGS: Tuple[str, ...] = ("uz", "ru", "en")
+ADMIN_SECRET_CODE = "20070518"
+CLICK_CARD = os.getenv("CLICK_CARD", "9860 0801 1915 0045").strip()
+CARD_HOLDER = "QALAM XIZMATI"
+PRICE_TEXT = "5,000 UZS"
+DEFAULT_LANG = "uz"
+SUPPORTED_LANGS = ("uz", "ru", "en")
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
-MODELS: List[str] = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-2.5-flash",
-]
-
-MAX_RETRIES_PER_MODEL: int = 2
-BACKOFF_DELAYS: List[float] = [2.0, 4.0]
-REQUEST_TIMEOUT_SECONDS: float = 12.0
-
+MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
 _unavailable_models: Set[str] = set()
-_key_rr_index: int = 0
+_key_rr_index = 0
 _key_rr_lock = asyncio.Lock()
 
-bot = Bot(
-    token=BOT_TOKEN.strip(),
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-_clients: List[genai.Client] = [genai.Client(api_key=k) for k in GEMINI_API_KEYS]
+_clients = [genai.Client(api_key=k) for k in GEMINI_API_KEYS]
 
 
 class AuthStates(StatesGroup):
@@ -89,10 +69,7 @@ async def _get_ordered_clients() -> List[Tuple[int, genai.Client]]:
     async with _key_rr_lock:
         start = _key_rr_index % total
         _key_rr_index = (_key_rr_index + 1) % total
-    return [
-        ((start + offset) % total, _clients[(start + offset) % total])
-        for offset in range(total)
-    ]
+    return [((start + i) % total, _clients[(start + i) % total]) for i in range(total)]
 
 
 UI_TEXTS: Dict[str, Dict[str, str]] = {
@@ -100,14 +77,8 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         "pay_btn": "💳 5,000 UZS to'lash",
         "key_btn": "🔑 Aktivatsiya kodini olish",
         "lang_btn": "🌐 Tilni o'zgartirish",
-        "lang_chosen": (
-            "✅ Til tanlandi: <b>O'zbekcha (Uzbek)</b>.\n"
-            "Faqat bot, to'lov, ilova va ilova asoschisi haqida savol bering."
-        ),
-        "already_approved": (
-            "✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n"
-            "📱 Ilova (app) uchun aktivatsiya kodingiz: <code>{key}</code>"
-        ),
+        "lang_chosen": "✅ Til tanlandi: <b>O'zbekcha</b>.\nFaqat bot, to'lov, ilova va ilova asoschisi haqida savol bering.",
+        "already_approved": "✅ To'lovingiz tasdiqlangan!\n📱 Aktivatsiya kodingiz: <code>{key}</code>",
         "already_pending": "⏳ To'lovingiz tekshiruvda! Administrator tasdiqlashini kuting.",
         "payment_info": (
             "💳 <b>Click to'lov ma'lumotlari:</b>\n\n"
@@ -120,96 +91,4 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         "paid_sent_msg": "⏳ <b>To'lov tekshiruvga yuborildi.</b> Admin tasdiqlashini kuting.",
         "paid_toast": "To'lov tekshiruvga yuborildi.",
         "key_approved": "🔑 <b>Ilova uchun aktivatsiya kodingiz:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Ilova kodi hali yopiq.</b> To'lovingiz tekshiruvda.",
-        "key_unpaid": (
-            "🔒 <b>Ilova kodi yopiq.</b>\n"
-            "Avval <b>«💳 5,000 UZS to'lash»</b> orqali Click karta "
-            "(<code>{click_card}</code>) ga to'lov qiling."
-        ),
-        "quota_error": "⏳ Bugungi bepul AI so'rovlar limiti tugadi.",
-        "ai_busy_error": "😔 AI serverlarida yuklama yuqori. Qayta urinib ko'ring.",
-    },
-    "ru": {
-        "pay_btn": "💳 Оплатить 5,000 UZS",
-        "key_btn": "🔑 Получить код активации",
-        "lang_btn": "🌐 Сменить язык",
-        "lang_chosen": (
-            "✅ Язык выбран: <b>Русский (Russian)</b>.\n"
-            "Задавайте вопросы только о боте, оплате, приложении и создателе."
-        ),
-        "already_approved": (
-            "✅ Ваша оплата подтверждена!\n"
-            "📱 Код активации: <code>{key}</code>"
-        ),
-        "already_pending": "⏳ Ваша оплата на проверке! Ожидайте подтверждения.",
-        "payment_info": (
-            "💳 <b>Реквизиты для оплаты (Click):</b>\n\n"
-            "💰 Сумма: <b>{price}</b>\n"
-            "💳 Карта Click: <code>{click_card}</code>\n"
-            "👤 Получатель: <b>{holder}</b>\n\n"
-            "После оплаты нажмите <b>«✅ Я оплатил»</b> ниже."
-        ),
-        "confirm_paid_btn": "✅ Я оплатил",
-        "paid_sent_msg": "⏳ <b>Оплата отправлена на проверку.</b> Ожидайте.",
-        "paid_toast": "Оплата отправлена на проверку.",
-        "key_approved": "🔑 <b>Ваш код активации:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Код закрыт.</b> Оплата на проверке.",
-        "key_unpaid": (
-            "🔒 <b>Код закрыт.</b>\n"
-            "Сначала оплатите через <b>«💳 Оплатить 5,000 UZS»</b> на карту Click: "
-            "<code>{click_card}</code>."
-        ),
-        "quota_error": "⏳ Дневной лимит AI-запросов исчерпан.",
-        "ai_busy_error": "😔 Серверы ИИ перегружены. Повторите попытку.",
-    },
-    "en": {
-        "pay_btn": "💳 Pay 5,000 UZS",
-        "key_btn": "🔑 Get Activation Code",
-        "lang_btn": "🌐 Change Language",
-        "lang_chosen": (
-            "✅ Language selected: <b>English</b>.\n"
-            "Ask questions only about the bot, payment, app, and founder."
-        ),
-        "already_approved": (
-            "✅ Your payment is already approved!\n"
-            "📱 Your activation code: <code>{key}</code>"
-        ),
-        "already_pending": "⏳ Your payment is under review! Wait for admin approval.",
-        "payment_info": (
-            "💳 <b>Click Payment Details:</b>\n\n"
-            "💰 Amount: <b>{price}</b>\n"
-            "💳 Click Card: <code>{click_card}</code>\n"
-            "👤 Holder: <b>{holder}</b>\n\n"
-            "After paying, tap <b>«✅ I Have Paid»</b> below."
-        ),
-        "confirm_paid_btn": "✅ I Have Paid",
-        "paid_sent_msg": "⏳ <b>Payment sent for review.</b> Please wait.",
-        "paid_toast": "Payment sent for review.",
-        "key_approved": "🔑 <b>Your activation code:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>App code is locked.</b> Payment is under review.",
-        "key_unpaid": (
-            "🔒 <b>App code is locked.</b>\n"
-            "First pay via <b>«💳 Pay 5,000 UZS»</b> to Click card: "
-            "<code>{click_card}</code>."
-        ),
-        "quota_error": "⏳ Daily free AI limit reached.",
-        "ai_busy_error": "😔 AI servers are busy right now. Try again shortly.",
-    },
-}
-
-SYSTEM_INSTRUCTION = (
-    "You are the official assistant for Qalam bot and app. "
-    "Answer ONLY questions about the bot, payment (Click card, 5,000 UZS), "
-    "activation code, the app, and the app founder. "
-    "CRITICAL RULE ABOUT FOUNDER/CREATOR: The ONLY founder, creator, and owner of Qalam bot and app is "
-    "Oktamov Samandar (in Uzbek: O'ktamov Samandar, in Russian: Уктамов Самандар, in English: Oktamov Samandar). "
-    "Whenever asked who the founder, creator, author, or owner is, state ONLY Oktamov Samandar and NEVER mention any other name. "
-    "Reply in the user's selected language."
-)
-
-
-def init_db() -> None:
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    with sqlite3.
+        "key_pending": "🔒 <b>Ilova
