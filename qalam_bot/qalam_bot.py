@@ -410,3 +410,55 @@ async def notify_admin(
         logger.warning(
             "Admin xabarnomasida kutilmagan xatolik (ADMIN_ID=%s): %s",
             ADMIN_ID,
+            repr(e),
+        )
+    return False
+
+
+# 5. Gemini AI, Qat'iy Til Nazorati, Multi-model + Multi-key Fallback
+def _build_strict_language_instruction(lang: str) -> str:
+    clean_lang = _normalize_lang(lang)
+    if clean_lang == "uz":
+        return (
+            "CRITICAL LANGUAGE RULE: You MUST respond STRICTLY and ONLY in Uzbek (lotin yozuvidagi o'zbek tili). "
+            "Never switch to English or Russian, even if the user writes words or sentences in English or Russian. "
+            "Every single word of your explanation and response must be in natural Uzbek."
+        )
+    if clean_lang == "ru":
+        return (
+            "CRITICAL LANGUAGE RULE: Ты ДОЛЖЕН отвечать СТРОГО и ТОЛЬКО на русском языке. "
+            "Никогда не переключайся на английский или узбекский язык, даже если пользователь пишет слова на другом языке. "
+            "Весь твой ответ должен быть написан исключительно на русском языке."
+        )
+    return (
+        "CRITICAL LANGUAGE RULE: You MUST respond STRICTLY and ONLY in English. "
+        "Never switch to Uzbek or Russian, even if the user includes words or phrases in another language. "
+        "Your entire response must be written exclusively in clear English."
+    )
+
+
+async def log_available_models() -> None:
+    try:
+        models = await asyncio.wait_for(
+            asyncio.to_thread(_clients[0].models.list),
+            timeout=10.0,
+        )
+        model_names = [getattr(m, "name", str(m)) for m in models]
+        logger.info("Mavjud Gemini modellari (%d ta kalit): %s", len(_clients), model_names)
+    except Exception as e:
+        logger.error("Modellarni olishda xatolik yuz berdi: %s", repr(e))
+
+
+def _is_503_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "503" in err_str or "UNAVAILABLE" in err_str
+
+
+def _is_404_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "404" in err_str or "NOT_FOUND" in err_str
+
+
+def _is_429_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "QUOTA" in err_str
