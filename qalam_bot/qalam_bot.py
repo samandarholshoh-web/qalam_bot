@@ -61,10 +61,10 @@ SUPPORTED_LANGS = ("uz", "ru", "en")
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
 
 MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
 ]
 _unavailable_models: Set[str] = set()
 _key_rr_index = 0
@@ -210,125 +210,4 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         ),
         "admin_code_prompt": (
             "🔐 <b>Вход в админ-раздел</b>\n\n"
-            "Введите код доступа. Без верного кода доступ закрыт:"
-        ),
-        "admin_code_wrong": (
-            "❌ <b>Неверный код!</b> Доступ к админ-разделу запрещён.\n"
-            "Нажмите <b>«🔐 Админ»</b> или /start, чтобы попробовать снова."
-        ),
-        "admin_stats": (
-            "📊 <b>АДМИН-ПАНЕЛЬ — СТАТИСТИКА</b>\n\n"
-            "👥 Пользователей бота: <b>{total_users}</b>\n"
-            "💰 Оплативших: <b>{paid_users}</b>\n"
-            "⏳ На проверке: <b>{pending_users}</b>\n"
-            "💳 Способ оплаты: <b>Только Click</b> (<code>{click_card}</code>)"
-        ),
-        "quota_error": "⏳ Дневной лимит AI-запросов исчерпан.",
-        "ai_busy_error": "😔 Серверы ИИ перегружены. Повторите попытку.",
-    },
-    "en": {
-        "role_prompt": (
-            "👋 <b>Welcome to Qalam Bot!</b>\n\n"
-            "Choose a section:"
-        ),
-        "user_role_btn": "👤 User",
-        "admin_role_btn": "🔐 Admin",
-        "user_entered": (
-            "✅ <b>User section opened.</b>\n"
-            "Use the buttons below or ask questions about the bot, payment, "
-            "app, and founder."
-        ),
-        "pay_btn": "💳 Pay 5,000 UZS",
-        "key_btn": "🔑 Get Activation Code",
-        "lang_btn": "🌐 Change Language",
-        "back_role_btn": "↩️ Back to section selection",
-        "lang_chosen": (
-            "✅ Language selected: <b>English</b>.\n"
-            "Ask questions only about the bot, payment, app, and founder."
-        ),
-        "already_approved": (
-            "✅ Your payment is approved!\n"
-            "📱 Your activation code: <code>{key}</code>"
-        ),
-        "already_pending": (
-            "⏳ Your payment is under review! Wait for admin approval."
-        ),
-        "payment_info": (
-            "💳 <b>Payment Details:</b>\n"
-            "ℹ️ <b>Payment is available only via Click.</b>\n\n"
-            "💰 Amount: <b>{price}</b>\n"
-            "💳 Card number: <code>{click_card}</code>\n"
-            "👤 Holder: <b>{holder}</b>\n\n"
-            "After paying, tap <b>«✅ I Have Paid»</b> — "
-            "your details will be sent to the admin."
-        ),
-        "confirm_paid_btn": "✅ I Have Paid",
-        "paid_sent_msg": (
-            "⏳ <b>Payment marked as done and sent to admin.</b> "
-            "Please wait for confirmation."
-        ),
-        "paid_toast": "Payment info sent to admin.",
-        "key_approved": "🔑 <b>Your activation code:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>App code is locked.</b> Payment is under review.",
-        "key_unpaid": (
-            "🔒 <b>App code is locked.</b>\n"
-            "Payment is available only via Click. First pay via "
-            "<b>«💳 Pay 5,000 UZS»</b> to card <code>{click_card}</code>."
-        ),
-        "admin_code_prompt": (
-            "🔐 <b>Admin Section Access</b>\n\n"
-            "Enter the access code. Admin view stays locked until the right code is entered:"
-        ),
-        "admin_code_wrong": (
-            "❌ <b>Incorrect code!</b> Admin access denied.\n"
-            "Tap <b>«🔐 Admin»</b> or /start to try again."
-        ),
-        "admin_stats": (
-            "📊 <b>ADMIN PANEL — STATISTICS</b>\n\n"
-            "👥 Active bot users: <b>{total_users}</b>\n"
-            "💰 Paid users: <b>{paid_users}</b>\n"
-            "⏳ Pending review: <b>{pending_users}</b>\n"
-            "💳 Payment method: <b>Click only</b> (<code>{click_card}</code>)"
-        ),
-        "quota_error": "⏳ Daily free AI limit reached.",
-        "ai_busy_error": "😔 AI servers are busy right now. Try again shortly.",
-    },
-}
-
-SYSTEM_INSTRUCTION = (
-    "You are the official assistant for Qalam bot and app. "
-    "Answer ONLY questions about the bot, payment (Click card only, 5,000 UZS), activation code, the app, and the app founder. "
-    "CRITICAL RULE: The ONLY founder, creator, author, and owner of Qalam bot and app is "
-    "Oktamov Samandar (Uzbek: O'ktamov Samandar, Russian: Уктамов Самандар, English: Oktamov Samandar). "
-    "Whenever asked who the founder or creator is, state ONLY Oktamov Samandar and NEVER mention any other name. "
-    "Reply in the user's selected language."
-)
-
-
-def _get_conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH, timeout=10.0)
-
-
-def init_db() -> None:
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    with _get_conn() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                lang TEXT DEFAULT 'uz',
-                status TEXT DEFAULT 'unpaid',
-                activation_key TEXT
-            )
-            """
-        )
-        conn.commit()
-
-
-def ensure_user(user: types.User) -> Dict[str, Any]:
-    with _get_conn() as conn:
-        conn.row_factory = sqlite3.Row
+            "Введите код доступа.
