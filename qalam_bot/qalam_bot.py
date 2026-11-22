@@ -532,3 +532,50 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     )
     await message.answer(
         get_txt(lang, "role_prompt"),
+        reply_markup=role_selection_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def cb_choose_lang(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    await state.clear()
+    ensure_user(callback.from_user)
+    lang = callback.data.split(":", 1)[1].strip()
+    lang = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
+    set_user_lang(callback.from_user.id, lang)
+    if callback.message:
+        try:
+            await callback.message.edit_text(get_txt(lang, "lang_chosen"))
+        except TelegramBadRequest:
+            await callback.message.answer(get_txt(lang, "lang_chosen"))
+        await callback.message.answer(
+            get_txt(lang, "role_prompt"),
+            reply_markup=role_selection_keyboard(lang),
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "confirm_paid")
+async def cb_confirm_paid(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    u = ensure_user(callback.from_user)
+    lang = u.get("lang") or DEFAULT_LANG
+    if u.get("status") == "approved":
+        key = u.get("activation_key") or generate_activation_key(callback.from_user.id)
+        await callback.answer("OK")
+        if callback.message:
+            await callback.message.answer(
+                get_txt(lang, "already_approved", key=html.escape(key))
+            )
+        return
+    set_user_status(callback.from_user.id, "pending")
+    await callback.answer(get_txt(lang, "paid_toast"))
+    if callback.message:
+        await callback.message.answer(get_txt(lang, "paid_sent_msg"))
+    if ADMIN_ID > 0:
+        uname = (
+            f"@{callback.from_user.username}"
+            if callback.
