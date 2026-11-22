@@ -38,8 +38,8 @@ GEMINI_API_KEYS: List[str] = [
 if not GEMINI_API_KEYS:
     raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
-# Quyidagi ADMIN-ID o'rniga o'zingizning raqamli Telegram ID ingizni kiriting (masalan: 123456789)
-_raw_admin_id = (os.getenv(7733016781) or "7733016781").strip().strip("\"'")
+# Quyidagi "7733016781" o'rniga kerak bo'lsa o'z raqamli Telegram ID ingizni qo'ying
+_raw_admin_id = (os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'")
 try:
     ADMIN_ID: int = int(_raw_admin_id)
 except ValueError:
@@ -432,4 +432,13 @@ def _build_strict_language_instruction(lang: str) -> str:
         return (
             "CRITICAL LANGUAGE RULE: Ты ДОЛЖЕН отвечать СТРОГО и ТОЛЬКО на русском языке. "
             "Никогда не переключайся на английский или узбекский язык, даже если пользователь пишет слова на другом языке. "
-            "Весь твой ответ должен быть написан исключительно на русском языке
+            "Весь твой ответ должен быть написан исключительно на русском языке."
+        )
+    return (
+        "CRITICAL LANGUAGE RULE: You MUST respond STRICTLY and ONLY in English. "
+        "Never switch to Uzbek or Russian, even if the user includes words or phrases in another language. "
+        "Your entire response must be written exclusively in clear English."
+    )
+
+
+async def log_available_
