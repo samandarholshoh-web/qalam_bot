@@ -38,20 +38,23 @@ async def generate_ai_reply(prompt: str) -> str:
     last_error = None
 
     for model_name in MODELS:
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=model_name,
-                contents=prompt,
-            )
-            if response and response.text and response.text.strip():
-                return response.text.strip()
-        except Exception as e:
-            logging.error(f"GEMINI ERROR ({model_name}): {repr(e)}")
-            last_error = e
-            continue
+        for attempt in range(3):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and response.text and response.text.strip():
+                    return response.text.strip()
+            except Exception as e:
+                logging.error(
+                    f"GEMINI ERROR ({model_name}, attempt {attempt + 1}): {repr(e)}"
+                )
+                last_error = e
+                await asyncio.sleep(1.5 * (attempt + 1))
 
-    raise last_error or RuntimeError("Barcha modellar javob qaytarishda xatolik berdi.")
+    raise last_error or RuntimeError("Model vaqtincha javob qaytarmadi.")
 
 
 @dp.message(CommandStart())
@@ -87,7 +90,6 @@ async def handle_text(message: types.Message):
     try:
         reply_text = await generate_ai_reply(user_text)
 
-        # Telegram xabar uzunligi 4096 belgidan oshmasligi uchun bo'lib yuborish
         for i in range(0, len(reply_text), 4000):
             await message.answer(reply_text[i : i + 4000])
 
