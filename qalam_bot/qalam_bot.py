@@ -41,6 +41,9 @@ CARD_NUMBER: str = ""
 CARD_HOLDER: str = "QALAM XIZMATI"
 PRICE_TEXT: str = "5,000 UZS"
 
+PAY_BTN_TEXT: str = "💳 5,000 UZS to'lash"
+KEY_BTN_TEXT: str = "🔑 Aktivatsiya kodini olish"
+
 DB_PATH = "bot_data.db"
 
 PRIMARY_MODEL: str = "gemini-3.5-flash-lite"
@@ -72,6 +75,26 @@ _ai_concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AI_REQUESTS)
 _user_last_request_ts: Dict[int, float] = {}
 _user_active_locks: Dict[int, asyncio.Lock] = {}
 _disabled_models: Set[str] = set()
+
+
+def _normalize_btn_text(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    return (
+        text.strip()
+        .replace("’", "'")
+        .replace("‘", "'")
+        .replace("ʻ", "'")
+        .replace("ʼ", "'")
+    )
+
+
+def _is_pay_button(message: Message) -> bool:
+    return _normalize_btn_text(message.text) == _normalize_btn_text(PAY_BTN_TEXT)
+
+
+def _is_key_button(message: Message) -> bool:
+    return _normalize_btn_text(message.text) == _normalize_btn_text(KEY_BTN_TEXT)
 
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
@@ -334,8 +357,8 @@ async def generate_ai_reply(prompt: str) -> str:
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [
-            KeyboardButton(text="💳 5,000 UZS to'lash"),
-            KeyboardButton(text="🔑 Aktivatsiya kodini olish"),
+            KeyboardButton(text=PAY_BTN_TEXT),
+            KeyboardButton(text=KEY_BTN_TEXT),
         ]
     ],
     resize_keyboard=True,
@@ -376,86 +399,83 @@ def admin_approval_keyboard(target_user_id: int) -> InlineKeyboardMarkup:
 async def handle_start(message: Message) -> None:
     if not message.from_user:
         return
-    get_or_create_user(message.from_user)
-    greeting = (
-        "Assalomu alaykum! <b>Qalam</b> sun'iy intellekt botiga xush kelibsiz.\n\n"
-        "Savollaringizni yuboring — men sizga yordam beraman. "
-        "Aktivatsiya kodini olish uchun quyidagi tugmalardan foydalaning."
-    )
-    await message.answer(
-        greeting,
-        parse_mode="HTML",
-        reply_markup=main_keyboard,
-    )
+    try:
+        get_or_create_user(message.from_user)
+        greeting = (
+            "Assalomu alaykum! <b>Qalam</b> sun'iy intellekt botiga xush kelibsiz.\n\n"
+            "Savollaringizni yuboring — men sizga yordam beraman. "
+            "Aktivatsiya kodini olish uchun quyidagi tugmalardan foydalaning."
+        )
+        await message.answer(
+            greeting,
+            parse_mode="HTML",
+            reply_markup=main_keyboard,
+        )
+    except Exception as e:
+        logger.error("handle_start xatosi (user_id=%s): %s", message.from_user.id, repr(e), exc_info=True)
+        await message.answer(
+            "Assalomu alaykum! Qalam botiga xush kelibsiz. Quyidagi tugmalardan foydalaning:",
+            reply_markup=main_keyboard,
+        )
 
 
-@dp.message(F.text == "💳 5,000 UZS to'lash")
+@dp.message(_is_pay_button)
 async def handle_payment_menu(message: Message) -> None:
     if not message.from_user:
         return
-    user_data = get_or_create_user(message.from_user)
-    if user_data["status"] == "approved" and user_data["activation_key"]:
-        safe_key = html.escape(str(user_data["activation_key"]))
-        await message.answer(
-            f"✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n"
-            f"🔑 Aktivatsiya kodingiz: <code>{safe_key}</code>",
-            parse_mode="HTML",
-            reply_markup=main_keyboard,
+    user_id = message.from_user.id
+    logger.info("To'lov tugmasi bosildi: user_id=%s", user_id)
+
+    try:
+        user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+        status = user_data.get("status")
+        activation_key = user_data.get("activation_key")
+
+        if status == "approved":
+            if not activation_key:
+                activation_key = generate_key_for_user(user_id)
+                await asyncio.to_thread(
+                    set_user_status,
+                    user_id,
+                    "approved",
+                    activation_key,
+                )
+            safe_key = html.escape(str(activation_key))
+            await message.answer(
+                f"✅ <b>Sizning to'lovingiz allaqachon tasdiqlangan!</b>\n"
+                f"🔑 Aktivatsiya kodingiz: <code>{safe_key}</code>",
+                parse_mode="HTML",
+                reply_markup=main_keyboard,
+            )
+            return
+
+        if status == "pending":
+            await message.answer(
+                "⏳ <b>Sizning to'lovingiz hozirda tekshiruvda!</b>\n"
+                "Administrator tasdiqlashini kuting. Tasdiqlangach, aktivatsiya kodingiz avtomatik yuboriladi.",
+                parse_mode="HTML",
+                reply_markup=main_keyboard,
+            )
+            return
+
+        safe_card = html.escape(CARD_NUMBER if CARD_NUMBER else "Kiritilmagan")
+        safe_holder = html.escape(CARD_HOLDER)
+        safe_price = html.escape(PRICE_TEXT)
+
+        payment_text = (
+            "💳 <b>To'lov ma'lumotlari:</b>\n\n"
+            f"💰 Summa: <b>{safe_price}</b>\n"
+            f"🔢 Karta raqami: <code>{safe_card}</code>\n"
+            f"👤 Karta egasi: <b>{safe_holder}</b>\n\n"
+            "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing."
         )
-        return
-
-    safe_card = html.escape(CARD_NUMBER if CARD_NUMBER else "Kiritilmagan")
-    safe_holder = html.escape(CARD_HOLDER)
-    safe_price = html.escape(PRICE_TEXT)
-
-    payment_text = (
-        "💳 <b>To'lov ma'lumotlari:</b>\n\n"
-        f"💰 Summa: <b>{safe_price}</b>\n"
-        f"🔢 Karta raqami: <code>{safe_card}</code>\n"
-        f"👤 Karta egasi: <b>{safe_holder}</b>\n\n"
-        "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing."
-    )
-    await message.answer(
-        payment_text,
-        parse_mode="HTML",
-        reply_markup=payment_inline_keyboard(),
-    )
-
-
-@dp.message(F.text == "🔑 Aktivatsiya kodini olish")
-async def handle_get_activation_key(message: Message) -> None:
-    if not message.from_user:
-        return
-    user_data = get_or_create_user(message.from_user)
-    status = user_data["status"]
-    activation_key = user_data["activation_key"]
-
-    if status == "approved" and activation_key:
         await message.answer(
-            f"🔑 <b>Sizning aktivatsiya kodingiz:</b>\n"
-            f"<code>{html.escape(str(activation_key))}</code>",
+            payment_text,
             parse_mode="HTML",
-            reply_markup=main_keyboard,
+            reply_markup=payment_inline_keyboard(),
         )
-    elif status == "pending":
+    except Exception as e:
+        logger.error("handle_payment_menu xatosi (user_id=%s): %s", user_id, repr(e), exc_info=True)
         await message.answer(
-            "🔒 <b>Aktivatsiya kodi hali yopiq.</b>\n"
-            "To'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
-            parse_mode="HTML",
-            reply_markup=main_keyboard,
-        )
-    else:
-        await message.answer(
-            "🔒 <b>Aktivatsiya kodi yopiq.</b>\n"
-            "Avval <b>«💳 5,000 UZS to'lash»</b> tugmasi orqali to'lovni amalga oshiring.",
-            parse_mode="HTML",
-            reply_markup=main_keyboard,
-        )
-
-
-@dp.callback_query(F.data == "paid_confirm")
-async def handle_paid_confirm(callback: CallbackQuery) -> None:
-    if not callback.from_user:
-        return
-    user_data = get_or_create_user(callback.from_user)
-    user_
+            "⚠️ To'lov ma'lumotlarini yuklashda vaqtinchalik xatolik yuz berdi. "
+            "I
