@@ -16,10 +16,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # O'zingizning kalitingizni qo'shti
 client = genai.Client(api_key=GEMINI_API_KEY)
 response = 
 client.models.generate_content(
-    model=gemini-2.5-flash",
+    model="gemini-2.5-flash",
     contents=savol_matni,
 )
-javob - response.text
+javob = response.text
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
