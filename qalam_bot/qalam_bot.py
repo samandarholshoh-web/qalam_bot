@@ -62,7 +62,8 @@ async def handle_ai_query(message: types.Message):
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
         
     except Exception as e:
-        await message.answer("Xatolik yuz berdi, iltimos birozdan so'ng qayta urinib ko'ring.")
+        print("GEMINI ERROR:", repr(e),flush=True)
+        await message.answer("Xatolik yuz berdi, iltimos keyinroq urinib ko'ring.")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
