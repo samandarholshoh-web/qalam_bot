@@ -56,11 +56,9 @@ async def handle_ai_query(message: types.Message):
     try:
         response = 
 client.models.generate_content(
-    
 model="gemini-2.5f-flash",
-         contents=message.text,
-        )
-        ai_reply = response.text
+contents=message.text)
+            ai_reply = response.text
         
         await message.answer(ai_reply, parse_mode="Markdown")
         await bot.delete_message(chat_id=message.chat.id, message_id=wait_msg.message_id)
