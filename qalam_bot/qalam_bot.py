@@ -329,4 +329,7 @@ async def handle_approve_payment(callback: CallbackQuery) -> None:
         return
 
     target_user = get_user_by_id(target_user_id)
-    if not target_user
+    if not target_user:
+        await
+    callback.answer("Foydalanuvchi bazada topilmadi.", show_alert=True)
+                    return
