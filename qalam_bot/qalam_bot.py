@@ -1,4 +1,6 @@
 import logging
+import asyncio
+import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -7,8 +9,8 @@ import string
 import google.generativeai as genai
 
 # 1. Bu yerga o'zingizning botingiz tokeni va Gemini kalitingizni yozasiz
-BOT_TOKEN = "9147437409:AAEr0f6lAzM9wKytDjFaPvYZiJtEagY5prg"
-GEMINI_API_KEY = "curl -fsSL"  # O'zingizning kalitingizni qo'shtirnoq ichiga yozasiz
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # O'zingizning kalitingizni qo'shtirnoq ichiga yozasiz
 
 # Gemini AI ni sozlash
 genai.configure(api_key=GEMINI_API_KEY)
@@ -65,7 +67,5 @@ async def handle_ai_query(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
-
-if name == "main":
-    import asyncio
+if __name__ == "__main__":  
     asyncio.run(main())
