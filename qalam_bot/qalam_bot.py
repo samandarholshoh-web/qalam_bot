@@ -7,6 +7,8 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -40,7 +42,6 @@ GEMINI_API_KEYS: List[str] = [
 if not GEMINI_API_KEYS:
     raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
-# Quyidagi "7733016781" o'rniga kerak bo'lsa o'z raqamli Telegram ID ingizni qo'ying
 _raw_admin_id = (os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'")
 try:
     ADMIN_ID: int = int(_raw_admin_id)
@@ -83,7 +84,10 @@ _unavailable_models: Set[str] = set()
 _key_rr_index: int = 0
 _key_rr_lock = asyncio.Lock()
 
-bot = Bot(token=BOT_TOKEN.strip())
+bot = Bot(
+    token=BOT_TOKEN.strip(),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 _clients: List[genai.Client] = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
 
@@ -98,7 +102,10 @@ async def _get_ordered_clients() -> List[Tuple[int, genai.Client]]:
     async with _key_rr_lock:
         start = _key_rr_index % total
         _key_rr_index = (_key_rr_index + 1) % total
-    return [((start + offset) % total, _clients[(start + offset) % total]) for offset in range(total)]
+    return [
+        ((start + offset) % total, _clients[(start + offset) % total])
+        for offset in range(total)
+    ]
 
 
 # 2. Ko'p tilli matnlar va interfeys lug'ati
@@ -106,21 +113,38 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
     "uz": {
         "pay_btn": "💳 5,000 UZS to'lash",
         "key_btn": "🔑 Aktivatsiya kodini olish",
-        "lang_chosen": "✅ Til tanlandi: <b>O'zbekcha (Uzbek)</b>.\nFaqat bot, to'lov, ilova va ilova asoschisi haqida savol berishingiz mumkin.",
-        "already_approved": "✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n📱 Ilova (app) uchun aktivatsiya kodingiz: <code>{key}</code>",
-        "already_pending": "⏳ Sizning to'lovingiz hozirda tekshiruvda!\nAdministrator tasdiqlashini kuting.",
+        "lang_btn": "🌐 Tilni o'zgartirish",
+        "lang_chosen": (
+            "✅ Til tanlandi: <b>O'zbekcha (Uzbek)</b>.\n"
+            "Faqat bot, to'lov, ilova va ilova asoschisi haqida savol berishingiz mumkin."
+        ),
+        "already_approved": (
+            "✅ Sizning to'lovingiz allaqachon tasdiqlangan!\n"
+            "📱 Ilova (app) uchun aktivatsiya kodingiz: <code>{key}</code>"
+        ),
+        "already_pending": (
+            "⏳ Sizning to'lovingiz hozirda tekshiruvda!\n"
+            "Administrator tasdiqlashini kuting."
+        ),
         "payment_info": (
             "💳 <b>Click to'lov ma'lumotlari:</b>\n\n"
             "💰 Summa: <b>{price}</b>\n"
             "💳 Click karta raqami: <code>{click_card}</code>\n"
             "👤 Karta egasi: <b>{holder}</b>\n\n"
-            "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing. To'lov tasdiqlangach ilova (app) uchun kodingiz ochiladi."
+            "To'lovni amalga oshirgach, pastdagi <b>«✅ To'lov qildim»</b> tugmasini bosing. "
+            "To'lov tasdiqlangach ilova (app) uchun kodingiz ochiladi."
         ),
         "confirm_paid_btn": "✅ To'lov qildim",
-        "paid_sent_msg": "⏳ <b>To'lov tekshiruvga yuborildi.</b>\nAdministrator to'lovni tekshirib tasdiqlashini kuting.",
+        "paid_sent_msg": (
+            "⏳ <b>To'lov tekshiruvga yuborildi.</b>\n"
+            "Administrator to'lovni tekshirib tasdiqlashini kuting."
+        ),
         "paid_toast": "To'lov tekshiruvga yuborildi.",
         "key_approved": "🔑 <b>Ilova (app) uchun aktivatsiya kodingiz:</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Ilova kodi hali yopiq.</b>\nTo'lovingiz tekshiruvda — administrator tasdiqlashini kuting.",
+        "key_pending": (
+            "🔒 <b>Ilova kodi hali yopiq.</b>\n"
+            "To'lovingiz tekshiruvda — administrator tasdiqlashini kuting."
+        ),
         "key_unpaid": (
             "🔒 <b>Ilova (app) kodi yopiq.</b>\n"
             "Faqat to'lov qilganda va administrator tasdiqlaganda ilova uchun kod beriladi.\n"
@@ -133,21 +157,38 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
     "ru": {
         "pay_btn": "💳 Оплатить 5,000 UZS",
         "key_btn": "🔑 Получить код активации",
-        "lang_chosen": "✅ Язык выбран: <b>Русский (Russian)</b>.\nВы можете задавать вопросы только о боте, оплате, приложении и создателе приложения.",
-        "already_approved": "✅ Ваша оплата уже подтверждена!\n📱 Ваш код активации для приложения (app): <code>{key}</code>",
-        "already_pending": "⏳ Ваша оплата сейчас на проверке!\nОжидайте подтверждения администратора.",
+        "lang_btn": "🌐 Сменить язык",
+        "lang_chosen": (
+            "✅ Язык выбран: <b>Русский (Russian)</b>.\n"
+            "Вы можете задавать вопросы только о боте, оплате, приложении и создателе приложения."
+        ),
+        "already_approved": (
+            "✅ Ваша оплата уже подтверждена!\n"
+            "📱 Ваш код активации для приложения (app): <code>{key}</code>"
+        ),
+        "already_pending": (
+            "⏳ Ваша оплата сейчас на проверке!\n"
+            "Ожидайте подтверждения администратора."
+        ),
         "payment_info": (
             "💳 <b>Реквизиты для оплаты (Click):</b>\n\n"
             "💰 Сумма: <b>{price}</b>\n"
             "💳 Номер карты Click: <code>{click_card}</code>\n"
             "👤 Получатель: <b>{holder}</b>\n\n"
-            "После оплаты нажмите кнопку <b>«✅ Я оплатил»</b> ниже. После подтверждения откроется код для приложения (app)."
+            "После оплаты нажмите кнопку <b>«✅ Я оплатил»</b> ниже. "
+            "После подтверждения откроется код для приложения (app)."
         ),
         "confirm_paid_btn": "✅ Я оплатил",
-        "paid_sent_msg": "⏳ <b>Оплата отправлена на проверку.</b>\nОжидайте подтверждения администратора.",
+        "paid_sent_msg": (
+            "⏳ <b>Оплата отправлена на проверку.</b>\n"
+            "Ожидайте подтверждения администратора."
+        ),
         "paid_toast": "Оплата отправлена на проверку.",
         "key_approved": "🔑 <b>Ваш код активации для приложения (app):</b>\n<code>{key}</code>",
-        "key_pending": "🔒 <b>Код для приложения пока закрыт.</b>\nОплата на проверке — дождитесь подтверждения администратора.",
+        "key_pending": (
+            "🔒 <b>Код для приложения пока закрыт.</b>\n"
+            "Оплата на проверке — дождитесь подтверждения администратора."
+        ),
         "key_unpaid": (
             "🔒 <b>Код для приложения (app) закрыт.</b>\n"
             "Код выдаётся только после оплаты и подтверждения администратором.\n"
@@ -160,11 +201,112 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
     "en": {
         "pay_btn": "💳 Pay 5,000 UZS",
         "key_btn": "🔑 Get Activation Code",
-        "lang_chosen": "✅ Language selected: <b>English</b>.\nYou can ask questions only about the bot, payment, the app, and the app founder.",
-        "already_approved": "✅ Your payment is already approved!\n📱 Your activation code for the app: <code>{key}</code>",
-        "already_pending": "⏳ Your payment is currently under review!\nPlease wait for admin approval.",
+        "lang_btn": "🌐 Change Language",
+        "lang_chosen": (
+            "✅ Language selected: <b>English</b>.\n"
+            "You can ask questions only about the bot, payment, the app, and the app founder."
+        ),
+        "already_approved": (
+            "✅ Your payment is already approved!\n"
+            "📱 Your activation code for the app: <code>{key}</code>"
+        ),
+        "already_pending": (
+            "⏳ Your payment is currently under review!\n"
+            "Please wait for admin approval."
+        ),
         "payment_info": (
             "💳 <b>Click Payment Details:</b>\n\n"
             "💰 Amount: <b>{price}</b>\n"
             "💳 Click Card Number: <code>{click_card}</code>\n"
-            "👤 Account
+            "👤 Account Holder: <b>{holder}</b>\n\n"
+            "Once you complete the payment, tap the <b>«✅ I Have Paid»</b> button below. "
+            "Your app activation code will unlock after admin approval."
+        ),
+        "confirm_paid_btn": "✅ I Have Paid",
+        "paid_sent_msg": (
+            "⏳ <b>Payment sent for review.</b>\n"
+            "Please wait for the admin to verify and approve it."
+        ),
+        "paid_toast": "Payment sent for review.",
+        "key_approved": "🔑 <b>Your activation code for the app:</b>\n<code>{key}</code>",
+        "key_pending": (
+            "🔒 <b>App code is still locked.</b>\n"
+            "Your payment is under review — please wait for admin approval."
+        ),
+        "key_unpaid": (
+            "🔒 <b>App code is locked.</b>\n"
+            "The app code is issued only after payment and admin approval.\n"
+            "First, pay via the <b>«💳 Pay 5,000 UZS»</b> button to Click card: <code>{click_card}</code>."
+        ),
+        "quota_error": "⏳ Today's free AI request limit has been reached. Please try again later.",
+        "ai_busy_error": "😔 Sorry, the AI servers are experiencing high load right now. Please try again in a few seconds.",
+        "out_of_scope_reply": "I only answer questions related to the bot.",
+    },
+}
+
+SYSTEM_INSTRUCTION = (
+    "You are the official assistant for Qalam bot and app. "
+    "Answer ONLY questions about the bot, payment (Click card, 5,000 UZS), activation code, "
+    "the app, and the app founder. If a user asks anything outside these topics, "
+    "politely state that you only answer questions related to the bot. "
+    "Reply in the user's selected language."
+)
+
+
+# 3. Ma'lumotlar bazasi (SQLite)
+def init_db() -> None:
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                lang TEXT DEFAULT 'uz',
+                status TEXT DEFAULT 'unpaid',
+                activation_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+
+
+def ensure_user(user: types.User) -> Dict[str, Any]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user.id,)).fetchone()
+        full_name = (user.full_name or "").strip()
+        username = user.username or ""
+        if not row:
+            conn.execute(
+                """
+                INSERT INTO users (user_id, username, full_name, lang, status)
+                VALUES (?, ?, ?, ?, 'unpaid')
+                """,
+                (user.id, username, full_name, DEFAULT_LANG),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user.id,)).fetchone()
+        else:
+            conn.execute(
+                """
+                UPDATE users
+                SET username = ?, full_name = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+                """,
+                (username, full_name, user.id),
+            )
+            conn.commit()
+        return dict(row)
+
+
+def set_user_lang(user_id: int, lang: str) -> None:
+    chosen = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET lang = ?, updated_at = CURRENT_TIMESTAMP WHERE user
