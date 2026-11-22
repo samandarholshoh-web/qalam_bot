@@ -38,7 +38,7 @@ GEMINI_API_KEYS: List[str] = [
 if not GEMINI_API_KEYS:
     raise ValueError("GEMINI_API_KEYS yoki GEMINI_API_KEY muhit o'zgaruvchisi topilmadi!")
 
-# Quyidagi "7733016781" o'rniga kerak bo'lsa o'z raqamli Telegram ID ingizni qo'ying
+# Quyidagi ADMIN-ID o'rniga o'zingizning raqamli Telegram ID ingizni kiriting (masalan: 123456789)
 _raw_admin_id = (os.getenv("ADMIN_ID") or "7733016781").strip().strip("\"'")
 try:
     ADMIN_ID: int = int(_raw_admin_id)
@@ -441,4 +441,479 @@ def _build_strict_language_instruction(lang: str) -> str:
     )
 
 
-async def log_available_
+async def log_available_models() -> None:
+    try:
+        models = await asyncio.wait_for(
+            asyncio.to_thread(_clients[0].models.list),
+            timeout=10.0,
+        )
+        model_names = [getattr(m, "name", str(m)) for m in models]
+        logger.info("Mavjud Gemini modellari (%d ta kalit): %s", len(_clients), model_names)
+    except Exception as e:
+        logger.error("Modellarni olishda xatolik yuz berdi: %s", repr(e))
+
+
+def _is_503_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "503" in err_str or "UNAVAILABLE" in err_str
+
+
+def _is_404_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "404" in err_str or "NOT_FOUND" in err_str
+
+
+def _is_429_error(err: Exception) -> bool:
+    err_str = str(err).upper()
+    return "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "QUOTA" in err_str
+
+
+async def generate_ai_reply(prompt: str, lang: str = DEFAULT_LANG) -> str:
+    clean_lang = _normalize_lang(lang)
+    system_instruction = _build_strict_language_instruction(clean_lang)
+    config = genai_types.GenerateContentConfig(
+        system_instruction=system_instruction,
+    )
+
+    candidate_models = [m for m in MODELS if m not in _unavailable_models]
+    if not candidate_models:
+        _unavailable_models.clear()
+        candidate_models = list(MODELS)
+
+    ordered_clients = await _get_ordered_clients()
+    attempt_logs: List[str] = []
+
+    for model_name in candidate_models:
+        skip_model = False
+        for key_idx, ai_client in ordered_clients:
+            for attempt in range(MAX_RETRIES_PER_MODEL):
+                try:
+                    response = await asyncio.wait_for(
+                        ai_client.aio.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=config,
+                        ),
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                    text = getattr(response, "text", None)
+                    if text and text.strip():
+                        logger.info(
+                            "AI javobi olindi: model=%s, lang=%s, key=%d, urinish=%d/%d",
+                            model_name,
+                            clean_lang,
+                            key_idx,
+                            attempt + 1,
+                            MAX_RETRIES_PER_MODEL,
+                        )
+                        return text.strip()
+                    raise RuntimeError("Model bo'sh javob qaytardi.")
+                except asyncio.TimeoutError:
+                    attempt_logs.append(f"{model_name}[k{key_idx}:{attempt + 1}]=TIMEOUT")
+                    logger.warning(
+                        "Gemini timeout (%ss): model=%s, lang=%s, key=%d, urinish=%d/%d",
+                        REQUEST_TIMEOUT_SECONDS,
+                        model_name,
+                        clean_lang,
+                        key_idx,
+                        attempt + 1,
+                        MAX_RETRIES_PER_MODEL,
+                    )
+                except Exception as e:
+                    if _is_404_error(e):
+                        _unavailable_models.add(model_name)
+                        attempt_logs.append(f"{model_name}[k{key_idx}]=404_NOT_FOUND")
+                        logger.warning(
+                            "Model topilmadi (404 NOT_FOUND), keyingi modelga o'tilmoqda: model=%s",
+                            model_name,
+                        )
+                        skip_model = True
+                        break
+
+                    if _is_429_error(e):
+                        attempt_logs.append(f"{model_name}[k{key_idx}]=429_QUOTA")
+                        logger.warning(
+                            "Gemini 429 Quota limiti tugadi (key=%d, model=%s) — keyingi kalit/modelga o'tilmoqda.",
+                            key_idx,
+                            model_name,
+                        )
+                        break
+
+                    if _is_503_error(e):
+                        attempt_logs.append(f"{model_name}[k{key_idx}:{attempt + 1}]=503_UNAVAILABLE")
+                        logger.warning(
+                            "Gemini 503 UNAVAILABLE xatosi: model=%s, key=%d, urinish=%d/%d",
+                            model_name,
+                            key_idx,
+                            attempt + 1,
+                            MAX_RETRIES_PER_MODEL,
+                        )
+                    else:
+                        attempt_logs.append(f"{model_name}[k{key_idx}:{attempt + 1}]={type(e).__name__}")
+                        logger.error(
+                            "Gemini xatosi: model=%s, key=%d, urinish=%d/%d, tafsilot=%s",
+                            model_name,
+                            key_idx,
+                            attempt + 1,
+                            MAX_RETRIES_PER_MODEL,
+                            repr(e),
+                        )
+
+                if attempt < MAX_RETRIES_PER_MODEL - 1:
+                    delay = BACKOFF_DELAYS[min(attempt, len(BACKOFF_DELAYS) - 1)]
+                    await asyncio.sleep(delay)
+
+            if skip_model:
+                break
+
+    raise RuntimeError(f"Barcha modellar muvaffaqiyatsiz tugadi: {', '.join(attempt_logs)}")
+
+
+# 6. Tugmalar, til tanlash va to'lov/aktivatsiya oqimi
+@dp.message(CommandStart())
+async def handle_start(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+    lang = _normalize_lang(user_data.get("lang"))
+
+    greeting = (
+        "Assalomu alaykum! <b>Qalam</b> sun'iy intellekt botiga xush kelibsiz.\n"
+        "Здравствуйте! Добро пожаловать в ИИ-бот <b>Qalam</b>.\n"
+        "Hello! Welcome to <b>Qalam</b> AI bot.\n\n"
+        "Iltimos, javob tilini tanlang / Выберите язык ответа / Please choose your language:"
+    )
+    await message.answer(
+        greeting,
+        parse_mode="HTML",
+        reply_markup=language_inline_keyboard(),
+    )
+    await message.answer(
+        "👇",
+        reply_markup=build_main_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data.startswith("set_lang:"))
+async def handle_set_language(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    selected_lang = _normalize_lang(callback.data.split(":", 1)[1])
+    await asyncio.to_thread(get_or_create_user, callback.from_user)
+    await asyncio.to_thread(set_user_lang, callback.from_user.id, selected_lang)
+
+    texts = _get_lang_texts(selected_lang)
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                texts["lang_chosen"],
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("Til xabarini yangilashda xato: %s", repr(e))
+
+    try:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=texts["lang_chosen"],
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard(selected_lang),
+        )
+    except Exception as e:
+        logger.warning("Asosiy klaviaturani yuborishda xato: %s", repr(e))
+
+    await safe_answer_callback(callback, "OK")
+
+
+@dp.message(F.text.in_(ALL_PAY_BUTTON_TEXTS))
+async def handle_payment_menu(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+    lang = _normalize_lang(user_data.get("lang"))
+    texts = _get_lang_texts(lang)
+    kb = build_main_keyboard(lang)
+
+    if user_data["status"] == "approved" and user_data["activation_key"]:
+        safe_key = html.escape(str(user_data["activation_key"]))
+        await message.answer(
+            texts["already_approved"].format(key=safe_key),
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
+
+    if user_data["status"] == "pending":
+        await message.answer(
+            texts["already_pending"],
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
+
+    safe_card = html.escape(CLICK_CARD)
+    safe_holder = html.escape(CARD_HOLDER)
+    safe_price = html.escape(PRICE_TEXT)
+
+    payment_text = texts["payment_info"].format(
+        price=safe_price,
+        click_card=safe_card,
+        holder=safe_holder,
+    )
+    await message.answer(
+        payment_text,
+        parse_mode="HTML",
+        reply_markup=payment_inline_keyboard(lang),
+    )
+
+
+@dp.callback_query(F.data == "paid_confirm")
+async def handle_paid_confirm(callback: CallbackQuery) -> None:
+    if not callback.from_user:
+        return
+    user_data = await asyncio.to_thread(get_or_create_user, callback.from_user)
+    user_id = user_data["user_id"]
+    lang = _normalize_lang(user_data.get("lang"))
+    texts = _get_lang_texts(lang)
+    full_name = user_data["full_name"] or "Noma'lum"
+    username_display = f"@{user_data['username']}" if user_data["username"] else "yo'q"
+
+    await asyncio.to_thread(set_user_status, user_id, "pending", None)
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                texts["paid_sent_msg"],
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("Xabarni yangilashda xato: %s", repr(e))
+
+    admin_text = (
+        "📥 <b>Yangi Click to'lov so'rovi!</b>\n\n"
+        f"👤 Ism: <b>{html.escape(full_name)}</b>\n"
+        f"🔗 Username: {html.escape(username_display)}\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"🌐 Til: <code>{html.escape(lang.upper())}</code>\n"
+        f"💳 Click karta: <code>{html.escape(CLICK_CARD)}</code>\n"
+        f"💰 Summa: <b>{html.escape(PRICE_TEXT)}</b>"
+    )
+    await notify_admin(
+        text=admin_text,
+        reply_markup=admin_approval_keyboard(user_id),
+    )
+
+    await safe_answer_callback(callback, texts["paid_toast"], show_alert=False)
+
+
+@dp.callback_query(F.data.startswith("approve_pay:"))
+async def handle_approve_payment(callback: CallbackQuery) -> None:
+    if not callback.from_user or callback.from_user.id != ADMIN_ID:
+        await safe_answer_callback(callback, "Bu amal faqat administrator uchun!", show_alert=True)
+        return
+
+    if not callback.data:
+        return
+
+    try:
+        target_user_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await safe_answer_callback(callback, "Noto'g'ri foydalanuvchi ID.", show_alert=True)
+        return
+
+    target_user = await asyncio.to_thread(get_user_by_id, target_user_id)
+    if not target_user:
+        await safe_answer_callback(callback, "Foydalanuvchi bazadan topilmadi.", show_alert=True)
+        return
+
+    target_lang = _normalize_lang(target_user.get("lang"))
+    activation_key = generate_key_for_user(target_user_id)
+    await asyncio.to_thread(set_user_status, target_user_id, "approved", activation_key)
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"✅ <b>To'lov tasdiqlandi!</b>\n"
+                f"🆔 Foydalanuvchi ID: <code>{target_user_id}</code>\n"
+                f"🔑 Kalit: <code>{html.escape(activation_key)}</code>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("Admin xabarini yangilashda xato: %s", repr(e))
+
+    user_approved_messages = {
+        "uz": (
+            "🎉 <b>Tabriklaymiz! Click to'lovingiz tasdiqlandi.</b>\n\n"
+            f"🔑 Sizning aktivatsiya kodingiz:\n"
+            f"<code>{html.escape(activation_key)}</code>"
+        ),
+        "ru": (
+            "🎉 <b>Поздравляем! Ваша оплата Click подтверждена.</b>\n\n"
+            f"🔑 Ваш код активации:\n"
+            f"<code>{html.escape(activation_key)}</code>"
+        ),
+        "en": (
+            "🎉 <b>Congratulations! Your Click payment has been approved.</b>\n\n"
+            f"🔑 Your activation code:\n"
+            f"<code>{html.escape(activation_key)}</code>"
+        ),
+    }
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=user_approved_messages[target_lang],
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard(target_lang),
+        )
+    except Exception as e:
+        logger.warning("Foydalanuvchiga kalit yuborishda xato (user_id=%s): %s", target_user_id, repr(e))
+
+    await safe_answer_callback(callback, "To'lov tasdiqlandi va kalit yuborildi.")
+
+
+@dp.callback_query(F.data.startswith("reject_pay:"))
+async def handle_reject_payment(callback: CallbackQuery) -> None:
+    if not callback.from_user or callback.from_user.id != ADMIN_ID:
+        await safe_answer_callback(callback, "Bu amal faqat administrator uchun!", show_alert=True)
+        return
+
+    if not callback.data:
+        return
+
+    try:
+        target_user_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await safe_answer_callback(callback, "Noto'g'ri foydalanuvchi ID.", show_alert=True)
+        return
+
+    target_user = await asyncio.to_thread(get_user_by_id, target_user_id)
+    if not target_user:
+        await safe_answer_callback(callback, "Foydalanuvchi bazadan topilmadi.", show_alert=True)
+        return
+
+    target_lang = _normalize_lang(target_user.get("lang"))
+    await asyncio.to_thread(set_user_status, target_user_id, "unpaid", None)
+
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"❌ <b>To'lov rad etildi.</b>\n"
+                f"🆔 Foydalanuvchi ID: <code>{target_user_id}</code>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning("Admin rad etish xabarini yangilashda xato: %s", repr(e))
+
+    user_rejected_messages = {
+        "uz": "❌ <b>To'lovingiz tasdiqlanmadi.</b>\nIltimos, to'lov ma'lumotlarini tekshiring yoki qayta urinib ko'ring.",
+        "ru": "❌ <b>Оплата не подтверждена.</b>\nПожалуйста, проверьте реквизиты оплаты или попробуйте снова.",
+        "en": "❌ <b>Payment was not approved.</b>\nPlease check your payment details or try again.",
+    }
+
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=user_rejected_messages[target_lang],
+            parse_mode="HTML",
+            reply_markup=build_main_keyboard(target_lang),
+        )
+    except Exception as e:
+        logger.warning("Foydalanuvchiga rad etish xabarini yuborishda xato (user_id=%s): %s", target_user_id, repr(e))
+
+    await safe_answer_callback(callback, "To'lov rad etildi.")
+
+
+@dp.message(F.text.in_(ALL_KEY_BUTTON_TEXTS))
+async def handle_get_activation_key(message: Message) -> None:
+    if not message.from_user:
+        return
+    user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+    lang = _normalize_lang(user_data.get("lang"))
+    texts = _get_lang_texts(lang)
+    kb = build_main_keyboard(lang)
+
+    status = user_data["status"]
+    activation_key = user_data["activation_key"]
+
+    if status == "approved" and activation_key:
+        await message.answer(
+            texts["key_approved"].format(key=html.escape(str(activation_key))),
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    elif status == "pending":
+        await message.answer(
+            texts["key_pending"],
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+    else:
+        await message.answer(
+            texts["key_unpaid"].format(click_card=html.escape(CLICK_CARD)),
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+
+@dp.message(F.text)
+async def handle_ai_message(message: Message) -> None:
+    if not message.from_user or not message.text:
+        return
+    prompt = message.text.strip()
+    if not prompt:
+        return
+
+    user_id = message.from_user.id
+    user_data = await asyncio.to_thread(get_or_create_user, message.from_user)
+    lang = _normalize_lang(user_data.get("lang"))
+    texts = _get_lang_texts(lang)
+    kb = build_main_keyboard(lang)
+
+    try:
+        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    except Exception as e:
+        logger.warning("Typing holatini yuborishda xato (user_id=%s): %s", user_id, repr(e))
+
+    try:
+        reply_text = await generate_ai_reply(prompt, lang=lang)
+    except Exception as e:
+        err_str = str(e)
+        logger.error("AI javob qaytarishda xatolik (user_id=%s, lang=%s): %s", user_id, lang, repr(e))
+        await notify_admin(
+            f"⚠️ <b>AI xizmati xatosi</b>\n"
+            f"🆔 User ID: <code>{user_id}</code>\n"
+            f"🌐 Til: <code>{html.escape(lang.upper())}</code>\n"
+            f"📄 Tafsilot: <code>{html.escape(err_str[:300])}</code>"
+        )
+        if "429_QUOTA" in err_str:
+            user_msg = texts["quota_error"]
+        else:
+            user_msg = texts["ai_busy_error"]
+        await message.answer(user_msg, reply_markup=kb)
+        return
+
+    chunk_size = 4000
+    for start in range(0, len(reply_text), chunk_size):
+        chunk = reply_text[start : start + chunk_size]
+        await message.answer(chunk)
+
+
+# 7. Ishga tushirish
+async def main() -> None:
+    init_db()
+    await log_available_models()
+    await bot.delete_webhook(drop_pending_updates=False)
+    logger.info("Qalam bot polling rejimida ishga tushmoqda...")
+    try:
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            handle_signals=True,
+        )
+    finally:
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
