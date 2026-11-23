@@ -21,6 +21,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 from google import genai
 from google.genai import types as genai_types
@@ -56,6 +57,12 @@ ADMIN_SECRET_CODE = os.getenv("ADMIN_SECRET_CODE", "20070518").strip()
 CLICK_CARD = os.getenv("CLICK_CARD", "9860 0801 1915 0045").strip()
 CARD_HOLDER = os.getenv("CARD_HOLDER", "QALAM XIZMATI").strip()
 PRICE_TEXT = os.getenv("PRICE_TEXT", "5,000 UZS").strip()
+MINI_APP_URL = (
+    os.getenv("MINI_APP_URL")
+    or os.getenv("WEBAPP_URL")
+    or ""
+).strip()
+
 DEFAULT_LANG = "uz"
 SUPPORTED_LANGS = ("uz", "ru", "en")
 DB_PATH = os.getenv("DB_PATH", "bot_data.db")
@@ -96,6 +103,12 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         ),
         "user_role_btn": "👤 Foydalanuvchi",
         "admin_role_btn": "🔐 Admin",
+        "mini_app_btn": "📱 Til o'rganish Mini Ilova",
+        "mini_app_missing_url": (
+            "ℹ️ <b>Mini Ilova (Xitoy, Ingliz, Rus tillari + AI Suhbat)</b> tayyor!\n"
+            "Uni Telegram ichida ochish uchun muhit o'zgaruvchisiga "
+            "<code>MINI_APP_URL</code> (HTTPS manzil) kiriting."
+        ),
         "user_entered": (
             "✅ <b>Foydalanuvchi bo'limi ochildi.</b>\n"
             "Quyidagi tugmalardan foydalaning yoki bot, to'lov, ilova va asoschisi "
@@ -166,6 +179,12 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         ),
         "user_role_btn": "👤 Пользователь",
         "admin_role_btn": "🔐 Админ",
+        "mini_app_btn": "📱 Мини-приложение языков",
+        "mini_app_missing_url": (
+            "ℹ️ <b>Мини-приложение (Китайский, Английский, Русский + AI Чат)</b> готово!\n"
+            "Чтобы открыть его в Telegram, укажите HTTPS-ссылку в переменной "
+            "<code>MINI_APP_URL</code>."
+        ),
         "user_entered": (
             "✅ <b>Открыт раздел пользователя.</b>\n"
             "Воспользуйтесь кнопками ниже или задайте вопрос о боте, оплате, "
@@ -233,6 +252,11 @@ UI_TEXTS: Dict[str, Dict[str, str]] = {
         ),
         "user_role_btn": "👤 User",
         "admin_role_btn": "🔐 Admin",
+        "mini_app_btn": "📱 Language Learning Mini App",
+        "mini_app_missing_url": (
+            "ℹ️ <b>Language Mini App (Chinese, English, Russian + AI Chat)</b> is ready!\n"
+            "Set an HTTPS URL in <code>MINI_APP_URL</code> to launch it inside Telegram."
+        ),
         "user_entered": (
             "✅ <b>User section opened.</b>\n"
             "Use the buttons below or ask questions about the bot, payment, "
@@ -410,17 +434,46 @@ def format_safe_html(text: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
 
 
-def role_selection_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def _is_valid_https_url(url: str) -> bool:
+    return url.startswith("https://") and len(url) > len("https://")
+
+
+def mini_app_inline_keyboard(lang: str) -> Optional[InlineKeyboardMarkup]:
+    if not _is_valid_https_url(MINI_APP_URL):
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(text=get_txt(lang, "user_role_btn")),
-                KeyboardButton(text=get_txt(lang, "admin_role_btn")),
-            ],
-            [KeyboardButton(text=get_txt(lang, "lang_btn"))],
-        ],
-        resize_keyboard=True,
+                InlineKeyboardButton(
+                    text=get_txt(lang, "mini_app_btn"),
+                    web_app=WebAppInfo(url=MINI_APP_URL),
+                )
+            ]
+        ]
     )
+
+
+def role_selection_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    rows: List[List[KeyboardButton]] = [
+        [
+            KeyboardButton(text=get_txt(lang, "user_role_btn")),
+            KeyboardButton(text=get_txt(lang, "admin_role_btn")),
+        ]
+    ]
+    if _is_valid_https_url(MINI_APP_URL):
+        rows.append(
+            [
+                KeyboardButton(
+                    text=get_txt(lang, "mini_app_btn"),
+                    web_app=WebAppInfo(url=MINI_APP_URL),
+                )
+            ]
+        )
+    else:
+        rows.append([KeyboardButton(text=get_txt(lang, "mini_app_btn"))])
+
+    rows.append([KeyboardButton(text=get_txt(lang, "lang_btn"))])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def language_keyboard() -> InlineKeyboardMarkup:
@@ -436,19 +489,31 @@ def language_keyboard() -> InlineKeyboardMarkup:
 
 
 def user_menu_keyboard(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+    rows: List[List[KeyboardButton]] = [
+        [
+            KeyboardButton(text=get_txt(lang, "pay_btn")),
+            KeyboardButton(text=get_txt(lang, "key_btn")),
+        ]
+    ]
+    if _is_valid_https_url(MINI_APP_URL):
+        rows.append(
             [
-                KeyboardButton(text=get_txt(lang, "pay_btn")),
-                KeyboardButton(text=get_txt(lang, "key_btn")),
-            ],
-            [
-                KeyboardButton(text=get_txt(lang, "lang_btn")),
-                KeyboardButton(text=get_txt(lang, "back_role_btn")),
-            ],
-        ],
-        resize_keyboard=True,
+                KeyboardButton(
+                    text=get_txt(lang, "mini_app_btn"),
+                    web_app=WebAppInfo(url=MINI_APP_URL),
+                )
+            ]
+        )
+    else:
+        rows.append([KeyboardButton(text=get_txt(lang, "mini_app_btn"))])
+
+    rows.append(
+        [
+            KeyboardButton(text=get_txt(lang, "lang_btn")),
+            KeyboardButton(text=get_txt(lang, "back_role_btn")),
+        ]
     )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def payment_confirm_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -708,6 +773,17 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
+    if text in {UI_TEXTS[lang_code]["mini_app_btn"] for lang_code in SUPPORTED_LANGS}:
+        kb = mini_app_inline_keyboard(lang)
+        if kb:
+            await message.answer(
+                get_txt(lang, "mini_app_btn"),
+                reply_markup=kb,
+            )
+        else:
+            await message.answer(get_txt(lang, "mini_app_missing_url"))
+        return
+
     if text in {UI_TEXTS[lang_code]["back_role_btn"] for lang_code in SUPPORTED_LANGS}:
         await state.clear()
         await message.answer(
@@ -762,11 +838,12 @@ async def main() -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await bot.session.close()
+        close_tasks = []
         for client in _clients:
-            try:
-                await client.aio.aclose()
-            except Exception:
-                pass
+            if getattr(client, "aio", None) and hasattr(client.aio, "aclose"):
+                close_tasks.append(client.aio.aclose())
+        if close_tasks:
+            await asyncio.gather(*close_tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
