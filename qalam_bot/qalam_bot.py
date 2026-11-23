@@ -835,4 +835,13 @@ async def cb_confirm_paid(callback: CallbackQuery) -> None:
             f"🔗 Username: {html.escape(uname)}\n"
             f"🆔 ID: <code>{callback.from_user.id}</code>\n"
             f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>\n"
-            f"💰 Summa:
+            f"💰 Summa: <b>{html.escape(PRICE_TEXT)}</b>"
+        )
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                admin_text,
+                reply_markup=admin_approval_keyboard(callback.from_user.id),
+            )
+        except (TelegramBadRequest, TelegramForbiddenError) as exc:
+            logger.warning("Adminga xabar yuborib bo'lmadi: %s", exc)
