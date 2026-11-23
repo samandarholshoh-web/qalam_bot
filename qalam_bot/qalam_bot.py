@@ -64,7 +64,7 @@ MINI_APP_URL = (
     or ""
 ).strip()
 
-TRIAL_SECONDS = 7 * 24 * 60 * 60  # 1 hafta (7 kun) bepul sinov muddati
+TRIAL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_LANG = "uz"
 SUPPORTED_LANGS = ("uz", "ru", "en")
 SUPPORTED_STUDY_LANGS = ("zh", "ru", "en")
@@ -535,7 +535,6 @@ def set_user_status(
 
 
 def has_active_access(user_row: Dict[str, Any]) -> Tuple[bool, int]:
-    """Returns (has_access, days_left_in_trial)."""
     status = user_row.get("status") or "unpaid"
     if status == "approved":
         return True, 0
@@ -845,3 +844,210 @@ async def cb_confirm_paid(callback: CallbackQuery) -> None:
             )
         except (TelegramBadRequest, TelegramForbiddenError) as exc:
             logger.warning("Adminga xabar yuborib bo'lmadi: %s", exc)
+
+
+@dp.callback_query(F.data.startswith("admin_approve:"))
+async def cb_admin_approve(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q", show_alert=True)
+        return
+    try:
+        uid = int(callback.data.split(":", 1)[1].strip())
+    except ValueError:
+        await callback.answer("Xato ID", show_alert=True)
+        return
+    key = generate_activation_key(uid)
+    set_user_status(uid, "approved", activation_key=key)
+    await callback.answer("Tasdiqlandi!")
+    if callback.message and isinstance(callback.message, Message):
+        base = callback.message.html_text or ""
+        try:
+            await callback.message.edit_text(
+                f"{base}\n\n✅ <b>TASDIQLANDI</b> | Kod: <code>{html.escape(key)}</code>"
+            )
+        except TelegramBadRequest:
+            pass
+    try:
+        await bot.send_message(
+            uid,
+            f"✅ To'lovingiz tasdiqlandi! Aktivatsiya kodingiz: <code>{html.escape(key)}</code>",
+        )
+    except Exception as exc:
+        logger.warning("Foydalanuvchiga tasdiq yuborilmadi (%s): %s", uid, exc)
+
+
+@dp.callback_query(F.data.startswith("admin_reject:"))
+async def cb_admin_reject(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.data:
+        return
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q", show_alert=True)
+        return
+    try:
+        uid = int(callback.data.split(":", 1)[1].strip())
+    except ValueError:
+        await callback.answer("Xato ID", show_alert=True)
+        return
+    set_user_status(uid, "unpaid", activation_key=None)
+    await callback.answer("Rad etildi")
+    if callback.message and isinstance(callback.message, Message):
+        base = callback.message.html_text or ""
+        try:
+            await callback.message.edit_text(f"{base}\n\n❌ <b>RAD ETILDI</b>")
+        except TelegramBadRequest:
+            pass
+    try:
+        await bot.send_message(uid, "❌ To'lovingiz rad etildi. Qayta urinib ko'ring.")
+    except Exception as exc:
+        logger.warning("Foydalanuvchiga rad javobi yuborilmadi (%s): %s", uid, exc)
+
+
+@dp.message(AuthStates.waiting_admin_code)
+async def process_admin_code(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    u = ensure_user(message.from_user)
+    lang = u.get("lang") or DEFAULT_LANG
+    code = (message.text or "").strip()
+    if code == ADMIN_SECRET_CODE:
+        await state.clear()
+        total_u, paid_u, pending_u = get_bot_stats()
+        await message.answer(
+            get_txt(
+                lang,
+                "admin_stats",
+                total_users=total_u,
+                paid_users=paid_u,
+                pending_users=pending_u,
+                click_card=html.escape(CLICK_CARD),
+            )
+        )
+    else:
+        await state.clear()
+        await message.answer(
+            get_txt(lang, "admin_code_wrong"),
+            reply_markup=study_language_keyboard(lang),
+        )
+
+
+@dp.message(F.text)
+async def handle_text(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not message.text:
+        return
+    text = message.text.strip()
+    u = ensure_user(message.from_user)
+    lang = u.get("lang") or DEFAULT_LANG
+
+    if text == get_txt(lang, "admin_role_btn"):
+        await state.set_state(AuthStates.waiting_admin_code)
+        await message.answer(get_txt(lang, "admin_code_prompt"))
+        return
+
+    if text == get_txt(lang, "lang_btn"):
+        await state.clear()
+        await message.answer(
+            "🌐 Tilni tanlang / Выберите язык / Choose language:",
+            reply_markup=language_keyboard(),
+        )
+        return
+
+    if text == get_txt(lang, "pay_btn"):
+        await state.clear()
+        await send_payment_prompt(message, lang)
+        return
+
+    if text == get_txt(lang, "key_btn"):
+        await state.clear()
+        status = u.get("status") or "unpaid"
+        if status == "approved":
+            key = u.get("activation_key") or generate_activation_key(message.from_user.id)
+            await message.answer(get_txt(lang, "key_approved", key=html.escape(key)))
+        elif status == "pending":
+            await message.answer(get_txt(lang, "key_pending"))
+        else:
+            await message.answer(
+                get_txt(lang, "key_unpaid", click_card=html.escape(CLICK_CARD)),
+                reply_markup=payment_confirm_keyboard(lang),
+            )
+        return
+
+    allowed, days_left = has_active_access(u)
+    if not allowed:
+        await message.answer(
+            get_txt(lang, "trial_expired_msg"),
+            reply_markup=study_language_keyboard(lang),
+        )
+        await send_payment_prompt(message, lang)
+        return
+
+    study_map = {
+        get_txt(lang, "study_zh_btn"): "zh",
+        get_txt(lang, "study_ru_btn"): "ru",
+        get_txt(lang, "study_en_btn"): "en",
+    }
+    if text in study_map:
+        s_lang = study_map[text]
+        set_user_study_lang(message.from_user.id, s_lang)
+        u["study_lang"] = s_lang
+        trial_info = get_txt(lang, "trial_active_text", days_left=days_left)
+        await message.answer(
+            get_txt(
+                lang,
+                "study_selected",
+                study_title=STUDY_PROGRAMS[s_lang]["title"],
+                trial_info=trial_info,
+            ),
+            reply_markup=study_workspace_keyboard(lang, s_lang),
+        )
+        return
+
+    if text == get_txt(lang, "change_study_btn"):
+        await message.answer(
+            get_txt(lang, "choose_study_prompt"),
+            reply_markup=study_language_keyboard(lang),
+        )
+        return
+
+    s_lang = u.get("study_lang") or "en"
+    prog = STUDY_PROGRAMS.get(s_lang) or STUDY_PROGRAMS["en"]
+
+    if text == get_txt(lang, "lesson_btn"):
+        await message.answer(
+            prog["lesson"],
+            reply_markup=mini_app_inline_keyboard(lang, s_lang),
+        )
+        return
+
+    if text == get_txt(lang, "apps_btn"):
+        await message.answer(
+            prog["apps"],
+            reply_markup=mini_app_inline_keyboard(lang, s_lang),
+        )
+        return
+
+    if text == get_txt(lang, "mini_app_btn"):
+        url = build_mini_app_url(s_lang)
+        if url:
+            await message.answer(
+                f"📱 <b>{prog['title']}</b> — Mini Ilova:",
+                reply_markup=mini_app_inline_keyboard(lang, s_lang),
+            )
+        else:
+            await message.answer(get_txt(lang, "mini_app_missing_url"))
+        return
+
+    reply_raw = await ask_gemini(text, lang=lang, study_lang=s_lang)
+    await message.answer(format_safe_html(reply_raw))
+
+
+async def main() -> None:
+    init_db()
+    await bot.delete_webhook(drop_pending_updates=False)
+    logger.info("Qalam bot ishga tushmoqda...")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
