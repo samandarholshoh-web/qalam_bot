@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -38,24 +39,21 @@ try:
 except ValueError:
     ADMIN_ID = 9271026986
 
-ADMIN_SECRET_CODE = os.getenv("ADMIN_SECRET_CODE", "20070518").strip()
+ADMIN_SECRET_CODE = os.getenv("ADMIN_SECRET_CODE", "").strip()
 CLICK_CARD = os.getenv("CLICK_CARD", "9860 0801 1915 0045").strip()
 CARD_HOLDER = os.getenv("CARD_HOLDER", "QALAM XIZMATI").strip()
-DB_PATH = os.getenv("DB_PATH", "bot_data.db")
+DB_PATH = os.getenv("DB_PATH", "/data/bot_data.db" if os.path.isdir("/data") else "bot_data.db").strip()
 
-# ==========================================================
-# O'ZINGIZNING HAVOLALARINGIZNI SHU YERGA YOZING YOKI ENV ORQALI BERING
-# ==========================================================
 MINI_APP_URL = (
     os.getenv("MINI_APP_URL")
     or os.getenv("WEBAPP_URL")
-    or "https://sizning-saytingiz.uz"
+    or ""
 ).strip()
-INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "https://www.instagram.com/sizning_username/").strip()
-TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/sizning_kanal").strip()
+INSTAGRAM_URL = os.getenv("INSTAGRAM_URL", "").strip()
+TELEGRAM_URL = os.getenv("TELEGRAM_URL", "").strip()
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
 
 class AuthStates(StatesGroup):
@@ -81,7 +79,10 @@ SHOP_PRODUCTS: Dict[str, int] = {
 # MA'LUMOTLAR BAZASI (SQLite)
 # ==========================================================
 def _get_conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH, timeout=10.0)
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
 
 
 def init_db() -> None:
@@ -120,17 +121,16 @@ def ensure_user(user: types.User) -> None:
     name = (user.full_name or "").strip()
     uname = user.username or ""
     with _get_conn() as conn:
-        row = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user.id,)).fetchone()
-        if not row:
-            conn.execute(
-                "INSERT INTO users (user_id, username, full_name, created_at) VALUES (?, ?, ?, ?)",
-                (user.id, uname, name, now_ts),
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET username = ?, full_name = ? WHERE user_id = ?",
-                (uname, name, user.id),
-            )
+        conn.execute(
+            """
+            INSERT INTO users (user_id, username, full_name, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name
+            """,
+            (user.id, uname, name, now_ts),
+        )
         conn.commit()
 
 
@@ -180,7 +180,7 @@ def _is_valid_https_url(url: str) -> bool:
 
 
 # ==========================================================
-# KLAVIATURALAR (TARTIBLI KETMA-KETLIK)
+# KLAVIATURALAR
 # ==========================================================
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     first_btn = (
@@ -254,6 +254,18 @@ MAIN_MENU_TEXT = (
 )
 
 
+def _parse_admin_callback(data: str) -> Tuple[int, int] | None:
+    parts = data.split(":")
+    if len(parts) < 3:
+        return None
+    try:
+        uid = int(parts[1])
+        receipt_id = int(parts[2])
+        return uid, receipt_id
+    except ValueError:
+        return None
+
+
 # ==========================================================
 # HANDLERLAR
 # ==========================================================
@@ -273,11 +285,16 @@ async def cb_admin_approve(callback: CallbackQuery) -> None:
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q", show_alert=True)
         return
-    parts = callback.data.split(":")
-    uid = int(parts[1])
-    receipt_id = int(parts[2]) if len(parts) > 2 else 0
-    if receipt_id:
+
+    parsed = _parse_admin_callback(callback.data)
+    if not parsed:
+        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
+        return
+
+    uid, receipt_id = parsed
+    if receipt_id > 0:
         update_receipt_status(receipt_id, "approved")
+
     await callback.answer("Tasdiqlandi!")
     if callback.message and isinstance(callback.message, Message):
         cap = callback.message.html_text or ""
@@ -301,11 +318,16 @@ async def cb_admin_reject(callback: CallbackQuery) -> None:
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q", show_alert=True)
         return
-    parts = callback.data.split(":")
-    uid = int(parts[1])
-    receipt_id = int(parts[2]) if len(parts) > 2 else 0
-    if receipt_id:
+
+    parsed = _parse_admin_callback(callback.data)
+    if not parsed:
+        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
+        return
+
+    uid, receipt_id = parsed
+    if receipt_id > 0:
         update_receipt_status(receipt_id, "rejected")
+
     await callback.answer("Rad etildi")
     if callback.message and isinstance(callback.message, Message):
         cap = callback.message.html_text or ""
@@ -359,10 +381,19 @@ async def process_receipt_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     amount = int(data.get("amount") or 0)
     reason = str(data.get("reason") or "To'lov")
-    photo_id = message.photo[-1].file_id
 
+    if amount <= 0:
+        await state.clear()
+        await message.answer(
+            "❗️ To'lov summasi topilmadi. Iltimos, to'lov jarayonini boshidan boshlang.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    photo_id = message.photo[-1].file_id
     receipt_id = save_receipt(message.from_user.id, reason, amount, photo_id)
     await state.clear()
+
     await message.answer(
         "✅ <b>Chekingiz qabul qilindi va adminga yuborildi!</b>\n"
         "Administrator tasdiqlashini kuting.",
@@ -411,7 +442,7 @@ async def process_admin_code(message: Message, state: FSMContext) -> None:
         return
     code = (message.text or "").strip()
     await state.clear()
-    if code == ADMIN_SECRET_CODE:
+    if ADMIN_SECRET_CODE and code == ADMIN_SECRET_CODE:
         total_u, approved_r, pending_r = get_bot_stats()
         await message.answer(
             "📊 <b>ADMIN PANEL — STATISTIKA</b>\n\n"
@@ -423,7 +454,7 @@ async def process_admin_code(message: Message, state: FSMContext) -> None:
         )
     else:
         await message.answer(
-            "❌ <b>Kod noto'g'ri!</b> Admin bo'limiga kirish rad etildi.",
+            "❌ <b>Kod noto'g'ri yoki maxfiy kod sozlanmagan!</b> Admin bo'limiga kirish rad etildi.",
             reply_markup=main_menu_keyboard(),
         )
 
@@ -435,13 +466,11 @@ async def handle_text(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     ensure_user(message.from_user)
 
-    # 1. Bosh menyu / Bekor qilish
     if text in ("🏠 Bosh menyu", "❌ Bekor qilish"):
         await state.clear()
         await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
         return
 
-    # 2. Do'kon
     if text == "🛒 Do'kon":
         await state.clear()
         await message.answer(
@@ -453,7 +482,6 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 3. Do'kondagi mahsulot tanlanganda -> keyingi qadam: chek rasmi
     if text in SHOP_PRODUCTS:
         price = SHOP_PRODUCTS[text]
         await state.update_data(amount=price, reason=text)
@@ -467,7 +495,6 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 4. To'lov menyusi
     if text == "💳 To'lov":
         await state.clear()
         await message.answer(
@@ -480,7 +507,6 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 5. Oylik o'qish to'lovi -> keyingi qadam: summa kiritish
     if text == "📅 Oylik o'qish to'lovi":
         await state.set_state(PaymentFlow.waiting_amount)
         await message.answer(
@@ -490,7 +516,6 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 6. Mening cheklarim
     if text == "🧾 Mening cheklarim":
         receipts = get_user_receipts(message.from_user.id)
         if not receipts:
@@ -502,7 +527,7 @@ async def handle_text(message: Message, state: FSMContext) -> None:
             "rejected": "❌ Rad etilgan",
         }
         lines = [
-            f"• #{r['id']} — <b>{html.escape(r['reason'])}</b> ({r['amount']:,} so'm) — {status_map.get(r['status'], r['status'])}"
+            f"• #{r['id']} — <b>{html.escape(str(r['reason']))}</b> ({int(r['amount']):,} so'm) — {status_map.get(str(r['status']), str(r['status']))}"
             for r in receipts
         ]
         await message.answer(
@@ -511,30 +536,35 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # 7. Instagram va Telegram havolalari
     if text == "📸 Instagram":
+        if not _is_valid_https_url(INSTAGRAM_URL):
+            await message.answer("ℹ️ Instagram havolasi (<code>INSTAGRAM_URL</code>) sozlanmagan.")
+            return
         kb = social_link_inline("📸 Instagram sahifani ochish", INSTAGRAM_URL)
         await message.answer(f"📸 <b>Instagram:</b> {html.escape(INSTAGRAM_URL)}", reply_markup=kb)
         return
 
     if text == "✈️ Telegram":
+        if not _is_valid_https_url(TELEGRAM_URL):
+            await message.answer("ℹ️ Telegram havolasi (<code>TELEGRAM_URL</code>) sozlanmagan.")
+            return
         kb = social_link_inline("✈️ Telegram kanalni ochish", TELEGRAM_URL)
         await message.answer(f"✈️ <b>Telegram:</b> {html.escape(TELEGRAM_URL)}", reply_markup=kb)
         return
 
-    # 8. Admin
     if text == "🔐 Admin":
         await state.set_state(AuthStates.waiting_admin_code)
-        await message.answer("🔐 <b>Admin bo'limiga kirish</b>\n\nKirish kodini kiriting:", reply_markup=cancel_keyboard())
+        await message.answer(
+            "🔐 <b>Admin bo'limiga kirish</b>\n\nKirish kodini kiriting:",
+            reply_markup=cancel_keyboard(),
+        )
         return
 
-    # 9. Mini App (agar HTTPS havola kiritilmagan bo'lsa)
     if text == "📱 Ilovani ochish":
         if not _is_valid_https_url(MINI_APP_URL):
             await message.answer("ℹ️ Mini Ilova uchun <code>MINI_APP_URL</code> (HTTPS manzil) sozlang.")
         return
 
-    # Noma'lum matn kiritilsa, asosiy menyuni qaytaradi
     await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -542,7 +572,10 @@ async def main() -> None:
     init_db()
     await bot.delete_webhook(drop_pending_updates=False)
     logger.info("Bot ishga tushmoqda...")
-    await dp.start_polling(bot)
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
 
 
 if __name__ == "__main__":
