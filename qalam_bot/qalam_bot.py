@@ -560,4 +560,222 @@ async def process_receipt_photo(message: Message, state: FSMContext) -> None:
 
 
 @dp.message(PaymentFlow.waiting_receipt)
-async def process_receipt_non_photo(message:
+async def process_receipt_non_photo(message: Message, state: FSMContext) -> None:
+  if not message.from_user:
+    return
+  text = (message.text or "").strip()
+  if text in ("❌ Bekor qilish", "🏠 Bosh menyu"):
+    await state.clear()
+    await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+    return
+  await message.answer(
+      "❗️ Iltimos, chekni rasm ko'rinishida yuboring yoki «❌ Bekor qilish»"
+      " tugmasini bosing.",
+      reply_markup=cancel_keyboard(),
+  )
+
+
+@dp.message(AuthStates.waiting_admin_code)
+async def process_admin_code(message: Message, state: FSMContext) -> None:
+  if not message.from_user:
+    return
+  text = (message.text or "").strip()
+  if text in ("❌ Bekor qilish", "🏠 Bosh menyu"):
+    await state.clear()
+    await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+    return
+
+  if message.from_user.id != ADMIN_ID:
+    await state.clear()
+    await message.answer(
+        "❌ Sizda admin bo'limiga kirish huquqi yo'q.",
+        reply_markup=main_menu_keyboard(),
+    )
+    return
+
+  if verify_totp_code(text):
+    await state.clear()
+    total_u, approved_r, pending_r, approved_sum = get_bot_stats()
+    pending_list = get_pending_receipts(limit=5)
+    await message.answer(
+        "📊 <b>ADMIN PANEL — STATISTIKA</b>\n\n"
+        f"👥 Foydalanuvchilar: <b>{total_u}</b> ta\n"
+        f"✅ Tasdiqlangan cheklar: <b>{approved_r}</b> ta\n"
+        f"💰 Tasdiqlangan tushum: <b>{approved_sum:,} so'm</b>\n"
+        f"⏳ Tekshiruvdagi cheklar: <b>{pending_r}</b> ta\n"
+        f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>",
+        reply_markup=main_menu_keyboard(),
+    )
+    for item in pending_list:
+      item_id = int(item["id"])
+      item_uid = int(item["user_id"])
+      cap = _build_receipt_caption(
+          receipt_id=item_id,
+          full_name="Foydalanuvchi",
+          username=None,
+          user_id=item_uid,
+          reason=str(item["reason"]),
+          amount=int(item["amount"]),
+          status_badge="⏳ <b>KUTILMOQDA</b>",
+      )
+      try:
+        await bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=str(item["photo_file_id"]),
+            caption=cap,
+            reply_markup=admin_receipt_keyboard(item_uid, item_id),
+        )
+      except Exception as exc:
+        logger.warning("Kutilayotgan chekni yuborishda xato (#%s): %s", item_id, exc)
+  else:
+    await message.answer(
+        "❌ <b>Google Authenticator kodi noto'g'ri, eskirgan yoki"
+        " ishlatilgan!</b>\n"
+        "Yangi 6 xonali kodni kiriting yoki «❌ Bekor qilish» tugmasini bosing.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@dp.message(F.text)
+async def handle_text(message: Message, state: FSMContext) -> None:
+  if not message.from_user or not message.text:
+    return
+  text = message.text.strip()
+  ensure_user(message.from_user)
+
+  if text in ("🏠 Bosh menyu", "❌ Bekor qilish"):
+    await state.clear()
+    await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+    return
+
+  if text == "🛒 Do'kon":
+    await state.clear()
+    await message.answer(
+        "🛒 <b>Do'kon</b>\n\n"
+        "Kaligrafiya kitoblari, lug'atlar va dars taqdimotlari. Mahsulotni"
+        " tanlang 👇\n\n"
+        "⚠️ <i>Ushbu qo'llanmalar mualliflik huquqi bilan himoyalangan. "
+        "Ularni nusxalash, boshqalarga tarqatish va sotish qat'iyan man"
+        " etiladi.</i>",
+        reply_markup=shop_keyboard(),
+    )
+    return
+
+  if text in SHOP_PRODUCTS:
+    price = SHOP_PRODUCTS[text]
+    await state.update_data(amount=price, reason=text)
+    await state.set_state(PaymentFlow.waiting_receipt)
+    await message.answer(
+        f"💳 Karta raqami: <code>{html.escape(CLICK_CARD)}</code>"
+        f" (<b>{html.escape(CARD_HOLDER)}</b>)\n"
+        f"📌 Mahsulot: <b>{html.escape(text)}</b>\n"
+        f"💰 Summa: <b>{price:,} so'm</b>\n\n"
+        "To'lovni amalga oshiring va <b>chek rasmini</b> shu yerga yuboring:",
+        reply_markup=cancel_keyboard(),
+    )
+    return
+
+  if text == "💳 To'lov":
+    await state.clear()
+    await message.answer(
+        "💳 <b>To'lov</b>\n\n"
+        "Nima uchun to'laysiz?\n\n"
+        "Kartaga pul o'tkazasiz va chek rasmini shu yerga yuborasiz — "
+        "administrator tasdiqlagach, kurs ochiladi yoki to'lov hisobingizga"
+        " yoziladi.\n\n"
+        f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>"
+        f" (<b>{html.escape(CARD_HOLDER)}</b>)",
+        reply_markup=payment_menu_keyboard(),
+    )
+    return
+
+  if text == "📅 Oylik o'qish to'lovi":
+    await state.set_state(PaymentFlow.waiting_amount)
+    await message.answer(
+        "📅 <b>Oylik o'qish to'lovi</b>\n\n"
+        "Qancha to'lamoqchisiz? Summani raqam bilan yozing (masalan:"
+        " 500000).",
+        reply_markup=cancel_keyboard(),
+    )
+    return
+
+  if text == "🧾 Mening cheklarim":
+    receipts = get_user_receipts(message.from_user.id)
+    if not receipts:
+      await message.answer(
+          "🧾 Hali chek yuborilmagan.", reply_markup=payment_menu_keyboard()
+      )
+      return
+    status_map = {
+        "pending": "⏳ Tekshiruvda",
+        "approved": "✅ Tasdiqlangan",
+        "rejected": "❌ Rad etilgan",
+    }
+    lines = [
+        f"• #{r['id']} — <b>{html.escape(str(r['reason']))}</b>"
+        f" ({int(r['amount']):,} so'm) —"
+        f" {status_map.get(str(r['status']), str(r['status']))}"
+        for r in receipts
+    ]
+    await message.answer(
+        "🧾 <b>Mening cheklarim:</b>\n\n" + "\n".join(lines),
+        reply_markup=payment_menu_keyboard(),
+    )
+    return
+
+  if text == "📸 Instagram":
+    if not _is_valid_https_url(INSTAGRAM_URL):
+      await message.answer(
+          "ℹ️ Instagram havolasi (<code>INSTAGRAM_URL</code>) sozlanmagan."
+      )
+      return
+    kb = social_link_inline("📸 Instagram sahifani ochish", INSTAGRAM_URL)
+    await message.answer(
+        f"📸 <b>Instagram:</b> {html.escape(INSTAGRAM_URL)}", reply_markup=kb
+    )
+    return
+
+  if text == "✈️ Telegram":
+    if not _is_valid_https_url(TELEGRAM_URL):
+      await message.answer(
+          "ℹ️ Telegram havolasi (<code>TELEGRAM_URL</code>) sozlanmagan."
+      )
+      return
+    kb = social_link_inline("✈️ Telegram kanalni ochish", TELEGRAM_URL)
+    await message.answer(
+        f"✈️ <b>Telegram:</b> {html.escape(TELEGRAM_URL)}", reply_markup=kb
+    )
+    return
+
+  if text == "🔐 Admin":
+    await state.set_state(AuthStates.waiting_admin_code)
+    await message.answer(
+        "🔐 <b>Admin bo'limiga kirish</b>\n\n"
+        "Google Authenticator ilovasidagi 6 xonali kodni kiriting:",
+        reply_markup=cancel_keyboard(),
+    )
+    return
+
+  if text == "📱 Ilovani ochish":
+    if not _is_valid_https_url(MINI_APP_URL):
+      await message.answer(
+          "ℹ️ Mini Ilova uchun <code>MINI_APP_URL</code> (HTTPS manzil)"
+          " sozlang."
+      )
+      return
+
+  await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
+
+
+async def main() -> None:
+  init_db()
+  await bot.delete_webhook(drop_pending_updates=False)
+  logger.info("Bot ishga tushmoqda...")
+  await dp.start_polling(
+      bot,
+      allowed_updates=dp.resolve_used_update_types(),
+  )
+
+
+if __name__ == "__main__":
+  asyncio.run(main())
