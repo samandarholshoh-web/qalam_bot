@@ -1,10 +1,11 @@
 import asyncio
+from contextlib import closing
 import html
 import logging
 import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
@@ -127,70 +128,80 @@ def init_db() -> None:
   db_dir = os.path.dirname(DB_PATH)
   if db_dir:
     os.makedirs(db_dir, exist_ok=True)
-  with _get_conn() as conn:
-    conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                created_at INTEGER
-            )
-            """)
-    conn.execute("""
-            CREATE TABLE IF NOT EXISTS receipts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                reason TEXT,
-                amount INTEGER,
-                photo_file_id TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at INTEGER
-            )
-            """)
-    conn.commit()
+  with closing(_get_conn()) as conn:
+    with conn:
+      conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    created_at INTEGER
+                )
+                """)
+      conn.execute("""
+                CREATE TABLE IF NOT EXISTS receipts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    reason TEXT,
+                    amount INTEGER,
+                    photo_file_id TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at INTEGER
+                )
+                """)
 
 
 def ensure_user(user: types.User) -> None:
   now_ts = int(time.time())
   name = (user.full_name or "").strip()
   uname = user.username or ""
-  with _get_conn() as conn:
-    conn.execute(
-        """
-            INSERT INTO users (user_id, username, full_name, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username = excluded.username,
-                full_name = excluded.full_name
-            """,
-        (user.id, uname, name, now_ts),
-    )
-    conn.commit()
+  with closing(_get_conn()) as conn:
+    with conn:
+      conn.execute(
+          """
+                INSERT INTO users (user_id, username, full_name, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    full_name = excluded.full_name
+                """,
+          (user.id, uname, name, now_ts),
+      )
 
 
 def save_receipt(user_id: int, reason: str, amount: int, photo_file_id: str) -> int:
-  with _get_conn() as conn:
-    cur = conn.execute(
-        """
-            INSERT INTO receipts (user_id, reason, amount, photo_file_id, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
-            """,
-        (user_id, reason, amount, photo_file_id, int(time.time())),
-    )
-    conn.commit()
-    return int(cur.lastrowid)
+  with closing(_get_conn()) as conn:
+    with conn:
+      cur = conn.execute(
+          """
+                INSERT INTO receipts (user_id, reason, amount, photo_file_id, status, created_at)
+                VALUES (?, ?, ?, ?, 'pending', ?)
+                """,
+          (user_id, reason, amount, photo_file_id, int(time.time())),
+      )
+      return int(cur.lastrowid)
+
+
+def get_receipt(receipt_id: int) -> Optional[Dict[str, Any]]:
+  with closing(_get_conn()) as conn:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM receipts WHERE id = ?",
+        (receipt_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def update_receipt_status(receipt_id: int, status: str) -> None:
-  with _get_conn() as conn:
-    conn.execute(
-        "UPDATE receipts SET status = ? WHERE id = ?", (status, receipt_id)
-    )
-    conn.commit()
+  with closing(_get_conn()) as conn:
+    with conn:
+      conn.execute(
+          "UPDATE receipts SET status = ? WHERE id = ?", (status, receipt_id)
+      )
 
 
 def get_user_receipts(user_id: int) -> List[Dict[str, Any]]:
-  with _get_conn() as conn:
+  with closing(_get_conn()) as conn:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM receipts WHERE user_id = ? ORDER BY id DESC LIMIT 15",
@@ -200,11 +211,11 @@ def get_user_receipts(user_id: int) -> List[Dict[str, Any]]:
 
 
 def get_pending_receipts(limit: int = 5) -> List[Dict[str, Any]]:
-  with _get_conn() as conn:
+  with closing(_get_conn()) as conn:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
-            SELECT id, user_id, reason, amount, created_at
+            SELECT id, user_id, reason, amount, photo_file_id, created_at
             FROM receipts
             WHERE status = 'pending'
             ORDER BY id DESC
@@ -215,8 +226,8 @@ def get_pending_receipts(limit: int = 5) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def get_bot_stats() -> Tuple[int, int, int]:
-  with _get_conn() as conn:
+def get_bot_stats() -> Tuple[int, int, int, int]:
+  with closing(_get_conn()) as conn:
     total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     approved_receipts = conn.execute(
         "SELECT COUNT(*) FROM receipts WHERE status = 'approved'"
@@ -224,7 +235,15 @@ def get_bot_stats() -> Tuple[int, int, int]:
     pending_receipts = conn.execute(
         "SELECT COUNT(*) FROM receipts WHERE status = 'pending'"
     ).fetchone()[0]
-  return int(total_users), int(approved_receipts), int(pending_receipts)
+    approved_sum = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM receipts WHERE status = 'approved'"
+    ).fetchone()[0]
+  return (
+      int(total_users),
+      int(approved_receipts),
+      int(pending_receipts),
+      int(approved_sum),
+  )
 
 
 def _is_valid_https_url(url: str) -> bool:
@@ -277,7 +296,7 @@ def cancel_keyboard() -> ReplyKeyboardMarkup:
   )
 
 
-def social_link_inline(label: str, url: str) -> InlineKeyboardMarkup | None:
+def social_link_inline(label: str, url: str) -> Optional[InlineKeyboardMarkup]:
   if not _is_valid_https_url(url):
     return None
   return InlineKeyboardMarkup(
@@ -308,7 +327,7 @@ MAIN_MENU_TEXT = (
 )
 
 
-def _parse_admin_callback(data: str) -> Tuple[int, int] | None:
+def _parse_admin_callback(data: str) -> Optional[Tuple[int, int]]:
   parts = data.split(":")
   if len(parts) < 3:
     return None
@@ -318,6 +337,29 @@ def _parse_admin_callback(data: str) -> Tuple[int, int] | None:
     return uid, receipt_id
   except ValueError:
     return None
+
+
+def _build_receipt_caption(
+    receipt_id: int,
+    full_name: str,
+    username: Optional[str],
+    user_id: int,
+    reason: str,
+    amount: int,
+    status_badge: Optional[str] = None,
+) -> str:
+  uname = f"@{username}" if username else "yo'q"
+  base = (
+      f"🧾 <b>Chek (#{receipt_id})</b>\n\n"
+      f"👤 Ism: <b>{html.escape(full_name or 'User')}</b>\n"
+      f"🔗 Username: {html.escape(uname)}\n"
+      f"🆔 ID: <code>{user_id}</code>\n"
+      f"📌 Sabab: <b>{html.escape(reason)}</b>\n"
+      f"💰 Summa: <b>{amount:,} so'm</b>"
+  )
+  if status_badge:
+    return f"{base}\n\n{status_badge}"
+  return base
 
 
 # ==========================================================
@@ -346,18 +388,33 @@ async def cb_admin_approve(callback: CallbackQuery) -> None:
     return
 
   uid, receipt_id = parsed
+  receipt = get_receipt(receipt_id) if receipt_id > 0 else None
+  if receipt and receipt.get("status") != "pending":
+    await callback.answer("Bu chek allaqachon ko'rib chiqilgan", show_alert=True)
+    return
+
   if receipt_id > 0:
     update_receipt_status(receipt_id, "approved")
 
   await callback.answer("Tasdiqlandi!")
   if callback.message and isinstance(callback.message, Message):
-    cap = callback.message.html_text or ""
     try:
-      await callback.message.edit_caption(
-          caption=f"{cap}\n\n✅ <b>TASDIQLANDI</b>"
-      )
+      if receipt:
+        new_cap = _build_receipt_caption(
+            receipt_id=receipt_id,
+            full_name="Foydalanuvchi",
+            username=None,
+            user_id=uid,
+            reason=str(receipt.get("reason") or "To'lov"),
+            amount=int(receipt.get("amount") or 0),
+            status_badge="✅ <b>TASDIQLANDI</b>",
+        )
+        await callback.message.edit_caption(caption=new_cap, reply_markup=None)
+      else:
+        await callback.message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest:
       pass
+
   try:
     await bot.send_message(
         uid,
@@ -384,18 +441,33 @@ async def cb_admin_reject(callback: CallbackQuery) -> None:
     return
 
   uid, receipt_id = parsed
+  receipt = get_receipt(receipt_id) if receipt_id > 0 else None
+  if receipt and receipt.get("status") != "pending":
+    await callback.answer("Bu chek allaqachon ko'rib chiqilgan", show_alert=True)
+    return
+
   if receipt_id > 0:
     update_receipt_status(receipt_id, "rejected")
 
   await callback.answer("Rad etildi")
   if callback.message and isinstance(callback.message, Message):
-    cap = callback.message.html_text or ""
     try:
-      await callback.message.edit_caption(
-          caption=f"{cap}\n\n❌ <b>RAD ETILDI</b>"
-      )
+      if receipt:
+        new_cap = _build_receipt_caption(
+            receipt_id=receipt_id,
+            full_name="Foydalanuvchi",
+            username=None,
+            user_id=uid,
+            reason=str(receipt.get("reason") or "To'lov"),
+            amount=int(receipt.get("amount") or 0),
+            status_badge="❌ <b>RAD ETILDI</b>",
+        )
+        await callback.message.edit_caption(caption=new_cap, reply_markup=None)
+      else:
+        await callback.message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest:
       pass
+
   try:
     await bot.send_message(
         uid, "❌ Yuborilgan chek rad etildi. Qayta tekshirib yuboring."
@@ -468,16 +540,13 @@ async def process_receipt_photo(message: Message, state: FSMContext) -> None:
   )
 
   if ADMIN_ID > 0:
-    uname = (
-        f"@{message.from_user.username}" if message.from_user.username else "yo'q"
-    )
-    caption = (
-        f"🧾 <b>Yangi chek (#{receipt_id})</b>\n\n"
-        f"👤 Ism: <b>{html.escape(message.from_user.full_name or 'User')}</b>\n"
-        f"🔗 Username: {html.escape(uname)}\n"
-        f"🆔 ID: <code>{message.from_user.id}</code>\n"
-        f"📌 Sabab: <b>{html.escape(reason)}</b>\n"
-        f"💰 Summa: <b>{amount:,} so'm</b>"
+    caption = _build_receipt_caption(
+        receipt_id=receipt_id,
+        full_name=message.from_user.full_name or "User",
+        username=message.from_user.username,
+        user_id=message.from_user.id,
+        reason=reason,
+        amount=amount,
     )
     try:
       await bot.send_photo(
@@ -516,9 +585,8 @@ async def process_admin_code(message: Message, state: FSMContext) -> None:
     await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
     return
 
-  await state.clear()
-
   if message.from_user.id != ADMIN_ID:
+    await state.clear()
     await message.answer(
         "❌ Sizda admin bo'limiga kirish huquqi yo'q.",
         reply_markup=main_menu_keyboard(),
@@ -526,34 +594,45 @@ async def process_admin_code(message: Message, state: FSMContext) -> None:
     return
 
   if verify_totp_code(text):
-    total_u, approved_r, pending_r = get_bot_stats()
+    await state.clear()
+    total_u, approved_r, pending_r, approved_sum = get_bot_stats()
     pending_list = get_pending_receipts(limit=5)
-    pending_lines = [
-        f"• #{r['id']} | ID: <code>{r['user_id']}</code> | "
-        f"<b>{html.escape(str(r['reason']))}</b> — {int(r['amount']):,} so'm"
-        for r in pending_list
-    ]
-    pending_block = (
-        "\n\n⏳ <b>Oxirgi kutilayotgan cheklar:</b>\n"
-        + "\n".join(pending_lines)
-        if pending_lines
-        else "\n\n✅ Hozircha kutilayotgan cheklar yo'q."
-    )
     await message.answer(
         "📊 <b>ADMIN PANEL — STATISTIKA</b>\n\n"
         f"👥 Foydalanuvchilar: <b>{total_u}</b> ta\n"
         f"✅ Tasdiqlangan cheklar: <b>{approved_r}</b> ta\n"
+        f"💰 Tasdiqlangan tushum: <b>{approved_sum:,} so'm</b>\n"
         f"⏳ Tekshiruvdagi cheklar: <b>{pending_r}</b> ta\n"
-        f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>"
-        f"{pending_block}",
+        f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>",
         reply_markup=main_menu_keyboard(),
     )
+    for item in pending_list:
+      item_id = int(item["id"])
+      item_uid = int(item["user_id"])
+      cap = _build_receipt_caption(
+          receipt_id=item_id,
+          full_name="Foydalanuvchi",
+          username=None,
+          user_id=item_uid,
+          reason=str(item["reason"]),
+          amount=int(item["amount"]),
+          status_badge="⏳ <b>KUTILMOQDA</b>",
+      )
+      try:
+        await bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=str(item["photo_file_id"]),
+            caption=cap,
+            reply_markup=admin_receipt_keyboard(item_uid, item_id),
+        )
+      except Exception as exc:
+        logger.warning("Kutilayotgan chekni yuborishda xato (#%s): %s", item_id, exc)
   else:
     await message.answer(
         "❌ <b>Google Authenticator kodi noto'g'ri, eskirgan yoki"
         " ishlatilgan!</b>\n"
-        "Yangi 6 xonali kodni kiriting.",
-        reply_markup=main_menu_keyboard(),
+        "Yangi 6 xonali kodni kiriting yoki «❌ Bekor qilish» tugmasini bosing.",
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -591,112 +670,3 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         f" (<b>{html.escape(CARD_HOLDER)}</b>)\n"
         f"📌 Mahsulot: <b>{html.escape(text)}</b>\n"
         f"💰 Summa: <b>{price:,} so'm</b>\n\n"
-        "To'lovni amalga oshiring va <b>chek rasmini</b> shu yerga yuboring:",
-        reply_markup=cancel_keyboard(),
-    )
-    return
-
-  if text == "💳 To'lov":
-    await state.clear()
-    await message.answer(
-        "💳 <b>To'lov</b>\n\n"
-        "Nima uchun to'laysiz?\n\n"
-        "Kartaga pul o'tkazasiz va chek rasmini shu yerga yuborasiz — "
-        "administrator tasdiqlagach, kurs ochiladi yoki to'lov hisobingizga"
-        " yoziladi.\n\n"
-        f"💳 Karta: <code>{html.escape(CLICK_CARD)}</code>"
-        f" (<b>{html.escape(CARD_HOLDER)}</b>)",
-        reply_markup=payment_menu_keyboard(),
-    )
-    return
-
-  if text == "📅 Oylik o'qish to'lovi":
-    await state.set_state(PaymentFlow.waiting_amount)
-    await message.answer(
-        "📅 <b>Oylik o'qish to'lovi</b>\n\n"
-        "Qancha to'lamoqchisiz? Summani raqam bilan yozing (masalan:"
-        " 500000).",
-        reply_markup=cancel_keyboard(),
-    )
-    return
-
-  if text == "🧾 Mening cheklarim":
-    receipts = get_user_receipts(message.from_user.id)
-    if not receipts:
-      await message.answer(
-          "🧾 Hali chek yuborilmagan.", reply_markup=payment_menu_keyboard()
-      )
-      return
-    status_map = {
-        "pending": "⏳ Tekshiruvda",
-        "approved": "✅ Tasdiqlangan",
-        "rejected": "❌ Rad etilgan",
-    }
-    lines = [
-        f"• #{r['id']} — <b>{html.escape(str(r['reason']))}</b>"
-        f" ({int(r['amount']):,} so'm) —"
-        f" {status_map.get(str(r['status']), str(r['status']))}"
-        for r in receipts
-    ]
-    await message.answer(
-        "🧾 <b>Mening cheklarim:</b>\n\n" + "\n".join(lines),
-        reply_markup=payment_menu_keyboard(),
-    )
-    return
-
-  if text == "📸 Instagram":
-    if not _is_valid_https_url(INSTAGRAM_URL):
-      await message.answer(
-          "ℹ️ Instagram havolasi (<code>INSTAGRAM_URL</code>) sozlanmagan."
-      )
-      return
-    kb = social_link_inline("📸 Instagram sahifani ochish", INSTAGRAM_URL)
-    await message.answer(
-        f"📸 <b>Instagram:</b> {html.escape(INSTAGRAM_URL)}", reply_markup=kb
-    )
-    return
-
-  if text == "✈️ Telegram":
-    if not _is_valid_https_url(TELEGRAM_URL):
-      await message.answer(
-          "ℹ️ Telegram havolasi (<code>TELEGRAM_URL</code>) sozlanmagan."
-      )
-      return
-    kb = social_link_inline("✈️ Telegram kanalni ochish", TELEGRAM_URL)
-    await message.answer(
-        f"✈️ <b>Telegram:</b> {html.escape(TELEGRAM_URL)}", reply_markup=kb
-    )
-    return
-
-  if text == "🔐 Admin":
-    await state.set_state(AuthStates.waiting_admin_code)
-    await message.answer(
-        "🔐 <b>Admin bo'limiga kirish</b>\n\n"
-        "Google Authenticator ilovasidagi 6 xonali kodni kiriting:",
-        reply_markup=cancel_keyboard(),
-    )
-    return
-
-  if text == "📱 Ilovani ochish":
-    if not _is_valid_https_url(MINI_APP_URL):
-      await message.answer(
-          "ℹ️ Mini Ilova uchun <code>MINI_APP_URL</code> (HTTPS manzil)"
-          " sozlang."
-      )
-      return
-
-  await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
-
-
-async def main() -> None:
-  init_db()
-  await bot.delete_webhook(drop_pending_updates=False)
-  logger.info("Bot ishga tushmoqda...")
-  await dp.start_polling(
-      bot,
-      allowed_updates=dp.resolve_used_update_types(),
-  )
-
-
-if __name__ == "__main__":
-  asyncio.run(main())
