@@ -560,13 +560,4 @@ async def process_receipt_photo(message: Message, state: FSMContext) -> None:
 
 
 @dp.message(PaymentFlow.waiting_receipt)
-async def process_receipt_non_photo(message: Message, state: FSMContext) -> None:
-  if not message.from_user:
-    return
-  text = (message.text or "").strip()
-  if text in ("❌ Bekor qilish", "🏠 Bosh menyu"):
-    await state.clear()
-    await message.answer(MAIN_MENU_TEXT, reply_markup=main_menu_keyboard())
-    return
-  await message.answer(
-      "❗️ Iltimos, che
+async def process_receipt_non_photo(message:
